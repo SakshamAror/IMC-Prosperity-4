@@ -1,0 +1,620 @@
+================================================================================
+NEXT STEPS — IMC PROSPERITY 4 ROUND 3 DATA ANALYSIS NOTEBOOK
+For Claude Code to execute
+================================================================================
+
+OBJECTIVE
+Build a Jupyter notebook called round3_analysis.ipynb in the project root.
+The notebook must work for any products that appear in round 3, since we do
+not know them yet. It is structured so that when round 3 CSVs drop, the user
+only changes the PRODUCTS list at the top of each section and re-runs.
+Do not hardcode product names anywhere except in that one config list.
+
+================================================================================
+PART 0 — FILE STRUCTURE AND CSV FORMAT (READ THIS CAREFULLY)
+================================================================================
+
+Project root layout (from screenshot):
+  IMC Prosperity 4/
+  ├── imc_prosperity_context.txt
+  ├── ronud2_model.py
+  ├── round3_analysis.ipynb          ← the notebook to build/replace
+  ├── TUTORIAL_ROUND_1/
+  │   ├── prices_round_0_day_-1.csv
+  │   ├── prices_round_0_day_-2.csv
+  │   ├── trades_round_0_day_-1.csv
+  │   └── trades_round_0_day_-2.csv
+  └── tutorial_round_analysis.ipynb
+
+When round 3 data is released, the user will create:
+  ROUND_3/
+  ├── prices_round_3_day_0.csv
+  ├── prices_round_3_day_1.csv
+  ├── prices_round_3_day_2.csv
+  ├── trades_round_3_day_0.csv
+  ├── trades_round_3_day_1.csv
+  └── trades_round_3_day_2.csv
+
+PRICES CSV FORMAT (semicolon-delimited, confirmed from tutorial data):
+  Columns:
+    day               — integer day number (-2, -1 for tutorial; 0,1,2 for live)
+    timestamp         — 0 to 999900 in steps of 100 (10,000 steps per day)
+    product           — string product name e.g. "EMERALDS"
+    bid_price_1       — best bid price (may be empty string if no order)
+    bid_volume_1      — best bid volume
+    bid_price_2       — second level bid (may be empty)
+    bid_volume_2
+    bid_price_3       — third level bid (may be empty)
+    bid_volume_3
+    ask_price_1       — best ask price (may be empty)
+    ask_volume_1
+    ask_price_2
+    ask_volume_2
+    ask_price_3
+    ask_volume_3
+    mid_price         — (best_bid_1 + best_ask_1) / 2
+    profit_and_loss   — running PnL of the submitted algorithm for this product
+
+TRADES CSV FORMAT (semicolon-delimited, confirmed from tutorial data):
+  Columns:
+    timestamp  — matches prices timestamps
+    buyer      — bot name string, or empty if not yet revealed
+    seller     — bot name string, or empty if not yet revealed
+    symbol     — product name
+    currency   — "XIRECS"
+    price      — trade execution price
+    quantity   — trade size
+
+KNOWN PRODUCTS SO FAR:
+  Tutorial (round 0):  EMERALDS (stable ~10000), TOMATOES (volatile ~5000)
+  Round 1 & 2:         ASH_COATED_OSMIUM (steady, pos limit 80),
+                       INTARIAN_PEPPER_ROOT (volatile, hidden pattern, limit 80)
+  Round 3:             UNKNOWN — notebook must discover and handle dynamically
+
+EMERALDS/ASH_COATED_OSMIUM behave like prior-year stable assets (Amethysts,
+Rainforest Resin) — fixed fair value, pure market making.
+TOMATOES/INTARIAN_PEPPER_ROOT behave like prior-year noisy assets — volatile
+with potential hidden structure.
+
+================================================================================
+PART 1 — NOTEBOOK CELL STRUCTURE
+================================================================================
+
+Build the notebook with these sections in order. Each section is a markdown
+header cell followed by code cells. Keep code cells focused — one logical
+operation per cell.
+
+--- SECTION 0: IMPORTS AND CONFIG ---
+
+Cell 0a (code): All imports at the top. Use:
+  import pandas as pd
+  import numpy as np
+  import matplotlib.pyplot as plt
+  import matplotlib.gridspec as gridspec
+  from matplotlib.colors import LinearSegmentedColormap
+  import warnings
+  warnings.filterwarnings('ignore')
+  %matplotlib inline
+  plt.rcParams['figure.figsize'] = (14, 4)
+  plt.rcParams['axes.grid'] = True
+
+Cell 0b (code): User config block — the ONLY place product names and paths
+  are set. Comment says "EDIT THIS CELL when round 3 data drops."
+
+  ROUND = 3
+  DATA_DIR = "ROUND_3"
+  DAYS = [0, 1, 2]
+  TRAIN_DAYS = [0, 1]    # held-out day is day 2 — never touch for param tuning
+  HELD_OUT_DAY = 2
+
+  # Fill in once round 3 products are known. Leave empty to auto-discover.
+  KNOWN_PRODUCTS = []
+
+Cell 0c (code): Data loading function. Must handle empty bid/ask fields
+  gracefully (they can be empty strings in the CSV):
+
+  def load_prices(round_num, day, data_dir):
+      path = f"{data_dir}/prices_round_{round_num}_day_{day}.csv"
+      df = pd.read_csv(path, sep=";")
+      # Cast numeric columns; coerce empty strings to NaN
+      price_cols = [c for c in df.columns if 'price' in c or 'volume' in c
+                    or c in ['mid_price', 'profit_and_loss']]
+      for col in price_cols:
+          df[col] = pd.to_numeric(df[col], errors='coerce')
+      return df
+
+  def load_trades(round_num, day, data_dir):
+      path = f"{data_dir}/trades_round_{round_num}_day_{day}.csv"
+      df = pd.read_csv(path, sep=";")
+      df['price'] = pd.to_numeric(df['price'], errors='coerce')
+      df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce')
+      return df
+
+  def load_all_days(round_num, days, data_dir):
+      prices = pd.concat([load_prices(round_num, d, data_dir) for d in days],
+                         ignore_index=True)
+      trades = pd.concat([load_trades(round_num, d, data_dir) for d in days],
+                         ignore_index=True)
+      return prices, trades
+
+  # Try loading — will fail gracefully if files don't exist yet
+  try:
+      prices_all, trades_all = load_all_days(ROUND, DAYS, DATA_DIR)
+      prices_train, trades_train = load_all_days(ROUND, TRAIN_DAYS, DATA_DIR)
+      PRODUCTS = KNOWN_PRODUCTS or sorted(prices_all['product'].unique().tolist())
+      print(f"Loaded {len(prices_all)} price rows, {len(trades_all)} trade rows")
+      print(f"Products discovered: {PRODUCTS}")
+  except FileNotFoundError:
+      print("Round 3 data not yet available. Add CSVs to ROUND_3/ and re-run.")
+      PRODUCTS = KNOWN_PRODUCTS
+
+--- SECTION 1: PRODUCT CLASSIFICATION ---
+
+Markdown cell explaining: Before writing any strategy, classify each product
+by answering the 5 classification questions from imc_prosperity_context.txt.
+The cells below auto-compute the statistics needed to answer those questions.
+
+Cell 1a: Summary statistics per product across all training days.
+  For each product print:
+    - mid_price mean, std, min, max
+    - average bid-ask spread (ask_price_1 - bid_price_1)
+    - autocorrelation of mid_price returns at lag 1 (negative = mean-reverting)
+    - whether profit_and_loss column is present and non-zero (confirms it's live)
+
+  def classify_product(df, product):
+      p = df[df['product'] == product].copy().sort_values('timestamp')
+      p['spread'] = p['ask_price_1'] - p['bid_price_1']
+      p['return'] = p['mid_price'].pct_change()
+      ac1 = p['return'].autocorr(lag=1)
+      print(f"\n{'='*50}")
+      print(f"PRODUCT: {product}")
+      print(f"  mid_price: mean={p['mid_price'].mean():.2f}, std={p['mid_price'].std():.2f}, "
+            f"range=[{p['mid_price'].min():.2f}, {p['mid_price'].max():.2f}]")
+      print(f"  avg spread: {p['spread'].mean():.2f}")
+      print(f"  return autocorr(lag=1): {ac1:.4f}  "
+            f"({'mean-reverting signal' if ac1 < -0.05 else 'trending/random'})")
+      return p
+
+  for prod in PRODUCTS:
+      classify_product(prices_train, prod)
+
+Cell 1b: Correlation matrix of mid_price returns across ALL products.
+  Pivots prices to wide format and computes pairwise return correlations.
+  High correlation (>0.7) suggests basket/pair relationship worth investigating.
+
+  wide = prices_train.pivot_table(index=['day','timestamp'],
+                                   columns='product', values='mid_price')
+  returns_wide = wide.pct_change().dropna()
+  corr = returns_wide.corr()
+  fig, ax = plt.subplots(figsize=(8, 6))
+  im = ax.imshow(corr, cmap='RdYlGn', vmin=-1, vmax=1)
+  ax.set_xticks(range(len(corr))); ax.set_xticklabels(corr.columns, rotation=45)
+  ax.set_yticks(range(len(corr))); ax.set_yticklabels(corr.columns)
+  plt.colorbar(im, ax=ax)
+  ax.set_title("Return correlation matrix — look for pairs >0.7 or <-0.7")
+  plt.tight_layout(); plt.show()
+  print(corr.round(3))
+
+--- SECTION 2: PER-PRODUCT PRICE SERIES AND ORDER BOOK ANALYSIS ---
+
+For each product in PRODUCTS, generate the following set of plots in one figure.
+Use a loop so this auto-scales to however many products round 3 introduces.
+
+Cell 2a: Multi-panel price series plot per product per day.
+  For each product:
+    Panel 1: mid_price over timestamp, colored by day (day 0 blue, day 1 orange,
+             day 2 red). Overlay with horizontal line at the mean mid_price
+             computed on training days only (never touch held-out day 2 here).
+    Panel 2: bid-ask spread (ask_price_1 - bid_price_1) over timestamp.
+             This shows how tradeable the product is moment-to-moment.
+    Panel 3: Rolling 200-tick std of mid_price (volatility proxy over time).
+
+  All three panels share the same x-axis (timestamp).
+  Title each figure with the product name.
+
+Cell 2b: Order book depth visualization for each product.
+  For each product on training day 0, plot the bid and ask volumes at all
+  3 levels over time as stacked area charts. This reveals the "wall" structure
+  (persistent large-volume levels) that indicates the hidden fair value. Look
+  for levels where volume is consistently large — these are the wall mid levels
+  described in imc_prosperity_context.txt.
+
+  Use:
+    - Blue area = bid volumes (levels 1, 2, 3 stacked)
+    - Red area = ask volumes (levels 1, 2, 3 stacked, plotted negative)
+  This gives a symmetric order book depth chart over time.
+
+Cell 2c: Wall mid calculation and comparison to raw midprice.
+  The wall mid is the average of the two levels with the largest volume on each
+  side. Compute it per timestamp and overlay it on the mid_price plot.
+  If wall_mid and mid_price diverge significantly, the wall_mid is the better
+  fair value estimate for market making.
+
+  def compute_wall_mid(row):
+      # Find the level with max bid volume and max ask volume
+      bid_vols = [(row.get(f'bid_volume_{i}', 0) or 0,
+                   row.get(f'bid_price_{i}', np.nan)) for i in range(1, 4)]
+      ask_vols = [(row.get(f'ask_volume_{i}', 0) or 0,
+                   row.get(f'ask_price_{i}', np.nan)) for i in range(1, 4)]
+      best_bid = max(bid_vols, key=lambda x: x[0])[1]
+      best_ask = min(ask_vols, key=lambda x: x[0])[1]  # min price on ask side
+      # Actually want max volume ask level:
+      best_ask = max(ask_vols, key=lambda x: x[0])[1]
+      if pd.isna(best_bid) or pd.isna(best_ask):
+          return np.nan
+      return (best_bid + best_ask) / 2
+
+--- SECTION 3: BOT TRADE ANALYSIS ---
+
+Markdown cell: "Identify the informed bot early. In P3, a bot named 'Olivia'
+bought at daily lows and sold at daily highs. We look for this pattern from
+round 3 onward. The approach: overlay every bot's trades on the price series
+and look for one whose trades cluster at price extremes."
+
+Cell 3a: Bot activity overview.
+  Count total trades, total volume, and unique products per buyer and seller.
+  Print a table sorted by total volume descending. This gives a quick view of
+  which bots are most active and on which side.
+
+  If buyer/seller columns are empty (not yet revealed), print a note saying
+  "Trader IDs not yet available in this round — analysis will run but will show
+  empty results. Re-run when IDs are revealed in round 5."
+
+Cell 3b: Bot trade overlay on price series.
+  For each product:
+    Plot mid_price as a thin black line.
+    For each unique buyer, scatter their buy trades as dots colored by bot name.
+    For each unique seller, scatter their sell trades as X markers.
+  Use a consistent color palette so the same bot has the same color across plots.
+  Add a legend. Title: "Bot trades vs. price — {product}"
+
+  This is the primary visual for identifying the Olivia-equivalent bot.
+
+Cell 3c: "Informed bot" test per bot.
+  For each bot that has at least 10 trades on a given product:
+    Compute the percentile rank of each of their trade prices within that day's
+    price distribution. If a bot's average buy-trade percentile is below 25 and
+    average sell-trade percentile is above 75, they are a strong informed bot
+    candidate. Print a ranked table of bots by this metric.
+
+  def bot_informed_score(trades_df, prices_df, product):
+      prod_trades = trades_df[trades_df['symbol'] == product].copy()
+      prod_prices = prices_df[prices_df['product'] == product]
+      daily_stats = prod_prices.groupby('day')['mid_price'].agg(['min','max'])
+
+      results = []
+      for bot in prod_trades['buyer'].dropna().unique():
+          buys = prod_trades[prod_trades['buyer'] == bot]
+          if len(buys) < 10:
+              continue
+          # Merge with daily min/max to compute relative position
+          merged = buys.merge(daily_stats, on='day', how='left')
+          merged['pct_rank'] = (merged['price'] - merged['min']) / \
+                                (merged['max'] - merged['min'])
+          results.append({'bot': bot, 'role': 'buyer',
+                          'avg_pct_rank': merged['pct_rank'].mean(),
+                          'n_trades': len(buys)})
+      # Repeat for sellers (high pct_rank = selling near top = informed seller)
+      # ... (mirror logic for sellers)
+      return pd.DataFrame(results).sort_values('avg_pct_rank')
+
+--- SECTION 4: MEAN REVERSION AND SPREAD ANALYSIS ---
+
+Markdown cell: "For any product that looks stable or basket-like, test whether
+its price (or spread vs. synthetic value) is stationary. We use the ADF test
+and visual inspection of rolling mean/std."
+
+Cell 4a: Rolling mean and std stability test per product.
+  For each product on training days, compute:
+    - Rolling 200-tick mean of mid_price
+    - Rolling 200-tick std of mid_price
+  Plot both. A stationary series should have roughly constant mean and std.
+  A drifting series will show changing mean. This tells you whether a z-score
+  computed on price level is meaningful.
+
+Cell 4b: ADF stationarity test (manual implementation, no statsmodels).
+  Implement a simplified ADF test using linear regression to test whether
+  the series has a unit root. If p-value < 0.05, the series is stationary
+  and mean reversion is a theoretically sound assumption.
+
+  Note to Claude Code: implement from scratch using numpy linear algebra since
+  statsmodels may not be available in all environments. Use the simple
+  augmented regression:
+    Δy_t = α + β*y_{t-1} + Σγ_i * Δy_{t-i} + ε
+  and t-statistic on β. Critical values: -3.43 (1%), -2.86 (5%), -2.57 (10%).
+
+Cell 4c: If two or more products have return correlation >0.6 (from Section 1),
+  compute the spread between them and test it for stationarity.
+  This is the basket/pair arbitrage check.
+
+  For each high-correlation pair:
+    1. Find the hedge ratio via OLS regression of price_A on price_B.
+    2. Compute spread = price_A - hedge_ratio * price_B.
+    3. Plot the spread over time.
+    4. Compute rolling z-score of the spread.
+    5. Mark on the plot where |z| > 2.0 — these are the entry signals.
+    6. Run a simple PnL simulation: enter at z=2, exit at z=0.5, using
+       unit size. Report estimated PnL per trade and total simulated PnL
+       on training data only.
+
+--- SECTION 5: OPTIONS ANALYSIS (CONDITIONAL) ---
+
+Markdown cell: "Run this section if any round 3 product appears to be an
+option or derivative (i.e., its price scales with another product's price,
+its value is bounded below by intrinsic value, or IMC's wiki describes it
+as a 'voucher', 'coupon', or 'right to buy'). If not applicable, skip."
+
+Cell 5a: Standard library Black-Scholes implementation (no scipy).
+  Include the full norm_cdf, bs_call, bs_delta, and implied_vol functions.
+  These are the exact implementations from imc_prosperity_context.txt.
+  Add a test cell that verifies:
+    bs_call(S=100, K=100, T=1.0, sigma=0.2) ≈ 7.965
+  This is a known closed-form result that confirms the implementation is correct.
+
+  def norm_cdf(x):
+      a1,a2,a3,a4,a5 = 0.254829592,-0.284496736,1.421413741,-1.453152027,1.061405429
+      p = 0.3275911
+      sign = 1 if x >= 0 else -1
+      x = abs(x) / (2**0.5)
+      t = 1.0 / (1.0 + p * x)
+      y = 1.0-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*np.exp(-x*x)
+      return 0.5*(1.0 + sign*y)
+
+  def bs_call(S, K, T, sigma):
+      if T <= 0 or sigma <= 0: return max(S - K, 0.0)
+      d1 = (np.log(S/K) + 0.5*sigma**2*T) / (sigma*np.sqrt(T))
+      d2 = d1 - sigma*np.sqrt(T)
+      return float(S*norm_cdf(d1) - K*norm_cdf(d2))
+
+  def bs_delta(S, K, T, sigma):
+      if T <= 0 or sigma <= 0: return 1.0 if S > K else 0.0
+      d1 = (np.log(S/K) + 0.5*sigma**2*T) / (sigma*np.sqrt(T))
+      return norm_cdf(d1)
+
+  def implied_vol(mkt_price, S, K, T, tol=1e-6):
+      lo, hi = 1e-6, 5.0
+      for _ in range(100):
+          mid = (lo + hi) / 2
+          if bs_call(S, K, T, mid) < mkt_price: lo = mid
+          else: hi = mid
+          if hi - lo < tol: return (lo + hi) / 2
+      return None
+
+Cell 5b: Implied volatility time series.
+  For each option-like product (needs a strike K and time-to-expiry T):
+    - Leave K and T as variables at the top of the cell with clear comments
+      explaining how to fill them in from the wiki.
+    - Compute IV at every timestep where a valid mid_price exists.
+    - Plot IV over time. Look for: (a) mean reversion in IV — the primary edge;
+      (b) any structural level that IV gravitates toward.
+    - Compute rolling mean and std of IV. Print the mean and std — these are
+      the parameters needed for z-score IV trading.
+
+Cell 5c: Volatility smile (if multiple strikes exist for the same underlying).
+  If round 3 introduces multiple options with different strikes on the same
+  underlying:
+    - Compute IV at each strike price for a snapshot timestamp.
+    - Plot IV vs. moneyness (S/K) as a scatter.
+    - A U-shaped curve (higher IV at OTM and ITM than ATM) is a smile.
+      This is the primary arb signal from P3. See imc_prosperity_context.txt
+      Framework C for how to trade it.
+
+Cell 5d: Delta computation.
+  For each option-like product, compute delta at every timestep.
+  Plot delta over time. This shows how much underlying exposure you carry
+  as the option moves in/out of the money, and what hedge ratio you'd need.
+  Note: position limits may prevent full delta hedging. Annotate the plot
+  with the position limit for both the option and underlying so it's clear
+  how much residual delta is unavoidable.
+
+--- SECTION 6: CONVERSION / MULTI-VENUE ANALYSIS (CONDITIONAL) ---
+
+Markdown cell: "Run this section if round 3 introduces a product with a
+conversion mechanism (tradeable on both local exchange and a foreign market
+with stated transport fees and tariffs). Fill in the cost structure from
+the wiki before running."
+
+Cell 6a: Config block for conversion costs.
+  TRANSPORT_FEE = None      # fill from wiki
+  IMPORT_TARIFF = None      # fill from wiki
+  EXPORT_TARIFF = None      # fill from wiki
+  CONVERSION_LIMIT = None   # fill from wiki (units per timestep)
+  FOREIGN_BID = None        # column name or constant
+  FOREIGN_ASK = None        # column name or constant
+
+Cell 6b: Effective conversion price time series.
+  Compute at each timestep:
+    effective_import = foreign_ask + transport_fee + import_tariff
+    effective_export = foreign_bid - transport_fee - export_tariff
+  Plot both against the local bid/ask. Highlight in green where
+  (local_ask < effective_export) — profitable export opportunity.
+  Highlight in red where (local_bid > effective_import) — profitable import.
+
+Cell 6c: Hidden taker bot probe analysis.
+  Look for fills at prices that shouldn't fill based on visible book.
+  In the trades data, flag any trade where the execution price is between
+  the best bid and best ask at that timestamp — this is a fill that came
+  from a hidden taker, not a visible counterparty.
+  Count the frequency and average price improvement of these fills.
+  If frequency > 10% of all trades, a hidden taker bot is likely present.
+  See imc_prosperity_context.txt Section 2D for how to exploit this.
+
+--- SECTION 7: BACKTESTING FRAMEWORK ---
+
+Markdown cell: "Generic backtesting framework. Implement strategy logic as
+a function that takes a single row of prices data and the current state
+(position, memory) and returns orders. The backtest engine handles fills,
+position tracking, and PnL. Only run on TRAIN_DAYS. Never touch HELD_OUT_DAY
+until all parameter choices are finalized."
+
+Cell 7a: Backtester engine.
+  Build a class-based backtester that:
+    - Iterates over price rows in timestamp order
+    - Accepts a strategy function: strategy(row, state) → list of (side, price, qty)
+    - Simulates fills: a buy order at price P fills if P >= best_ask_1 at that tick;
+      a sell order fills if P <= best_bid_1. This is conservative (assumes you
+      need to cross the spread to guarantee a fill).
+    - Tracks position, cash, and marks to market at each step using mid_price.
+    - Hard position limit: rejects orders that would breach it.
+    - Returns a DataFrame with columns: timestamp, position, cash, mtm_pnl,
+      and a fills DataFrame.
+
+  class Backtester:
+      def __init__(self, position_limit: int, initial_cash: float = 0.0):
+          self.position_limit = position_limit
+          self.initial_cash = initial_cash
+
+      def run(self, prices_df: pd.DataFrame, strategy_fn,
+              product: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+          """
+          Runs strategy_fn on each row of prices_df for the given product.
+          Returns (results_df, fills_df).
+          """
+          prod = prices_df[prices_df['product'] == product].copy()
+          prod = prod.sort_values(['day', 'timestamp']).reset_index(drop=True)
+          state = {'position': 0, 'cash': self.initial_cash, 'memory': {}}
+          results, fills = [], []
+
+          for _, row in prod.iterrows():
+              orders = strategy_fn(row, state)
+              for side, price, qty in (orders or []):
+                  if side == 'buy':
+                      ask = row['ask_price_1']
+                      if pd.notna(ask) and price >= ask:
+                          new_pos = state['position'] + qty
+                          if abs(new_pos) <= self.position_limit:
+                              state['position'] = new_pos
+                              state['cash'] -= ask * qty
+                              fills.append({'timestamp': row['timestamp'],
+                                            'day': row['day'], 'side': 'buy',
+                                            'price': ask, 'qty': qty})
+                  elif side == 'sell':
+                      bid = row['bid_price_1']
+                      if pd.notna(bid) and price <= bid:
+                          new_pos = state['position'] - qty
+                          if abs(new_pos) <= self.position_limit:
+                              state['position'] = new_pos
+                              state['cash'] += bid * qty
+                              fills.append({'timestamp': row['timestamp'],
+                                            'day': row['day'], 'side': 'sell',
+                                            'price': bid, 'qty': qty})
+              mtm = state['cash'] + state['position'] * row['mid_price']
+              results.append({'timestamp': row['timestamp'], 'day': row['day'],
+                              'position': state['position'],
+                              'cash': state['cash'], 'mtm_pnl': mtm})
+
+          return pd.DataFrame(results), pd.DataFrame(fills)
+
+Cell 7b: PnL reporting function.
+  Given the results_df from Backtester.run(), compute and print:
+    - Total final PnL
+    - PnL per day breakdown
+    - Sharpe ratio (mean daily PnL / std daily PnL * sqrt(252))
+    - Max drawdown (peak-to-trough on cumulative MTM PnL)
+    - Max position reached (check if hitting limit)
+    - Number of fills per day
+  Plot the cumulative MTM PnL curve over time, with day boundaries as vertical
+  dashed lines.
+
+  def report_backtest(results_df, fills_df, label=""):
+      final_pnl = results_df['mtm_pnl'].iloc[-1]
+      daily_pnl = results_df.groupby('day')['mtm_pnl'].last().diff().fillna(
+                  results_df.groupby('day')['mtm_pnl'].last().iloc[0])
+      sharpe = daily_pnl.mean() / daily_pnl.std() * (252**0.5) \
+               if daily_pnl.std() > 0 else 0
+      cummax = results_df['mtm_pnl'].cummax()
+      max_dd = (cummax - results_df['mtm_pnl']).max()
+      max_pos = results_df['position'].abs().max()
+      print(f"[{label}] Final PnL: {final_pnl:,.0f} | Sharpe: {sharpe:.2f} | "
+            f"Max Drawdown: {max_dd:,.0f} | Max Position: {max_pos}")
+      # Plot cumulative PnL
+      fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+      ax1.plot(results_df['timestamp'], results_df['mtm_pnl'])
+      ax1.set_title(f"{label} — Cumulative MTM PnL")
+      ax2.plot(results_df['timestamp'], results_df['position'])
+      ax2.axhline(0, color='gray', linewidth=0.5)
+      ax2.set_title("Position over time")
+      plt.tight_layout(); plt.show()
+
+Cell 7c: Example strategy stubs (to be filled in).
+  Write empty strategy function stubs that the user fills in. Each stub is
+  clearly labeled. Include one stub per likely strategy type:
+
+  def market_making_strategy(row, state):
+      """
+      Fair value = wall_mid from row. Place bid at FV - spread, ask at FV + spread.
+      Skew based on inventory. Return orders as list of (side, price, qty).
+      """
+      # TODO: implement
+      return []
+
+  def zscore_mean_reversion_strategy(row, state):
+      """
+      Compute z-score of mid_price relative to rolling window stored in
+      state['memory']. Enter long at z < -2, short at z > 2. Exit at |z| < 0.5.
+      Only use on products confirmed stationary in Section 4.
+      """
+      # TODO: implement
+      return []
+
+  def basket_arb_strategy(row_basket, row_components, state):
+      """
+      Compute synthetic basket value from component mid prices.
+      Trade when spread z-score exceeds threshold.
+      """
+      # TODO: implement
+      return []
+
+--- SECTION 8: HELD-OUT VALIDATION ---
+
+Markdown cell (warning): "Only run this section once, after all parameter
+decisions in Sections 4-7 are finalized. Running this mid-development
+and adjusting parameters based on the result converts the held-out day
+into training data, which defeats its purpose entirely."
+
+Cell 8a: Single held-out backtest run.
+  Run the same strategy functions used in Section 7 on HELD_OUT_DAY (day 2).
+  Compare the held-out PnL report to the training PnL report side by side.
+  If held-out PnL is less than 50% of training PnL, the strategy is likely
+  overfit and parameters should be reconsidered on theoretical grounds, not
+  by re-tuning on the held-out day.
+
+================================================================================
+PART 2 — IMPLEMENTATION NOTES FOR CLAUDE CODE
+================================================================================
+
+1. The notebook file to create/replace is round3_analysis.ipynb in the project
+   root (the existing file can be overwritten — it currently exists but we're
+   building a proper version from scratch).
+
+2. All code must work with standard Python data science stack: pandas, numpy,
+   matplotlib. Do not use statsmodels, scipy, or sklearn anywhere — the user
+   may need to re-implement parts of this logic in standard library Python for
+   the actual submission, and keeping the notebook close to submission-ready
+   code reduces that translation burden.
+
+3. Every cell should be runnable independently (after running the config cell)
+   except for cells that explicitly depend on earlier outputs. Use clear
+   variable names that persist in notebook scope.
+
+4. Sections 5 and 6 are conditional. Do not skip them — include them but wrap
+   the main logic in:
+     if False:  # Set to True if round 3 product is an option
+         ...
+   so the notebook runs end-to-end without errors even before round 3 data
+   is available or before the product type is known.
+
+5. All plots should have titles, labeled axes, and legends. Use plt.tight_layout()
+   before every plt.show(). Default figure width is 14 inches (set in Section 0).
+
+6. Where a TODO comment is left, add a brief hint in the comment about what
+   the function body should compute, so the user can fill it in quickly.
+
+7. The backtester in Section 7 assumes a simple fill model (cross the spread
+   to fill). This is intentionally conservative. Do not implement a more
+   complex fill model — the official backtester on the Prosperity website is
+   the source of truth for fill simulation.
+
+================================================================================
+END OF NEXT STEPS
+================================================================================
