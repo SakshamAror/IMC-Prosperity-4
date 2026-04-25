@@ -191,11 +191,12 @@ class Trader:
     OPT_MM_SPREAD     = 8     # wide enough to cover ~5-unit model bias on 5100-5300
     OPT_MM_SIZE       = 1     # small to limit one-sided accumulation
     OPT_SKEW_COEF     = 2
-    OPT_ITM_ARB_THRESH = 2    # plan spec: only buy deep ITM if ask < intrinsic - 2
-    OPT_ITM_MAX_SIZE  = 10    # cap arb buy per tick to limit delta buildup
-    OPT_DELTA_LIMIT   = 50
+    OPT_DELTA_LIMIT   = 150   # raised: directional leverage positions have intentional delta
     OPT_SPIKE_THRESH  = 30
     OPT_SPIKE_RESUME  = 20
+    OPT_TRADE_THRESH  = 15    # regression fit to mid; we fill at ask (mid+2.5); add model bias buffer
+    OPT_TRADE_QTY     = 3     # small qty to accumulate gradually; prevents runaway fill
+    OPT_MAX_POS       = 50    # per-strike position cap; avoids unlimited accumulation
 
     # TODO: verify all limits from the round 3 wiki before submitting
     POSITION_LIMITS: Dict[str, int] = {
@@ -434,78 +435,37 @@ class Trader:
         return (self._opt_fv(K, S + 1, days) - self._opt_fv(K, S - 1, days)) / 2
 
     def _trade_vev_option(self, symbol: str, od: OrderDepth, pos: int,
-                          limit: int, spot: float, trader_data: dict, timestamp: int) -> List[Order]:
-        if (not self.OPTIONS): return []
+                          limit: int, spot: float, days_remaining: int, spike_active: bool) -> List[Order]:
+        if not self.OPTIONS:
+            return []
+
+        K = int(symbol.split("_")[1])
+        if K in (6000, 6500) or K not in self.OPT_FV_COEFFS:
+            return []
+
+        if not od.buy_orders or not od.sell_orders:
+            return []
 
         orders: List[Order] = []
-
-        strike = int(symbol.split("_")[1])
-
-        # -----------------------------
-        # Time to expiry (normalized)
-        # -----------------------------
-        TOTAL_TICKS = 1_000_000
-        tte = max(0.0, (TOTAL_TICKS - timestamp) / TOTAL_TICKS)
-
-        # -----------------------------
-        # Order book mid price
-        # -----------------------------
-        if not od.buy_orders or not od.sell_orders:
-            return orders
-
         best_bid = max(od.buy_orders)
         best_ask = min(od.sell_orders)
         mid = (best_bid + best_ask) / 2
 
-        # -----------------------------
-        # Option intrinsic value
-        # -----------------------------
-        intrinsic = max(spot - strike, 0)
-
-        # -----------------------------
-        # Simple data-driven extrinsic model
-        # -----------------------------
-        moneyness = (spot - strike) / max(spot, 1)
-
-        # decay accelerates near expiry
-        time_factor = sqrt(tte)
-
-        # heuristic extrinsic (no BS IV dependency)
-        extrinsic = (
-            0.018 * spot * time_factor * (1.0 - 0.5 * abs(moneyness))
-        )
-
-        fair_value = intrinsic + extrinsic
-
-        # -----------------------------
-        # Mispricing signal
-        # -----------------------------
+        fair_value = self._opt_fv(K, spot, days_remaining)
         edge = mid - fair_value
 
-        buy_capacity = limit - pos
-        sell_capacity = limit + pos
+        buy_cap = min(limit - pos, self.OPT_MAX_POS - pos)
+        sell_cap = min(limit + pos, self.OPT_MAX_POS + pos)
 
-        # -----------------------------
-        # Mean reversion / decay capture logic
-        # -----------------------------
-        threshold = max(2, 0.01 * spot)
+        if edge < -self.OPT_TRADE_THRESH and buy_cap > 0:
+            qty = min(buy_cap, self.OPT_TRADE_QTY)
+            orders.append(Order(symbol, int(best_ask), qty))
+        elif edge > self.OPT_TRADE_THRESH and sell_cap > 0:
+            qty = min(sell_cap, self.OPT_TRADE_QTY)
+            orders.append(Order(symbol, int(best_bid), -qty))
 
-        # BUY underpriced option
-        if edge < -threshold:
-            qty = min(buy_capacity, 8)
-            if qty > 0:
-                orders.append(Order(symbol, int(best_ask), qty))
-
-        # SELL overpriced option
-        elif edge > threshold:
-            qty = min(sell_capacity, 8)
-            if qty > 0:
-                orders.append(Order(symbol, int(best_bid), -qty))
-
-        # -----------------------------
-        # End-of-life liquidation
-        # -----------------------------
-        if tte < 0.05:
+        # End-of-life liquidation on final day
+        if days_remaining == 0:
             if pos > 0:
                 orders.append(Order(symbol, int(best_bid), -pos))
             elif pos < 0:

@@ -193,12 +193,8 @@ class Trader:
     OPT_MM_SPREAD     = 8     # wide enough to cover ~5-unit model bias on 5100-5300
     OPT_MM_SIZE       = 1     # small to limit one-sided accumulation
     OPT_SKEW_COEF     = 2
-    OPT_ITM_ARB_THRESH = 2    # plan spec: only buy deep ITM if ask < intrinsic - 2
-    OPT_ITM_MAX_SIZE  = 10    # cap arb buy per tick to limit delta buildup
-    OPT_DELTA_LIMIT   = 50
-    OPT_SPIKE_THRESH  = 30
-    OPT_SPIKE_RESUME  = 20
-    OPT_LEVERAGE_FRAC = 0.25  # option pos = 25% of VEV MR target (ITM calls only)
+    OPT_LEVERAGE_FRAC     = 0.25  # option pos = 25% of VEV MR target (ITM calls only)
+    OPT_LEVERAGE_MAX_TRADE = 5    # max units to buy/sell per tick (prevents binary switching)
 
     # TODO: verify all limits from the round 3 wiki before submitting
     POSITION_LIMITS: Dict[str, int] = {
@@ -284,28 +280,8 @@ class Trader:
             else:
                 result[product] = []
 
-        # ── Delta hedge via VELVETFRUIT_EXTRACT ───────────────────────────────
-        if self.OPTIONS and vev_od:
-            net_delta = sum(
-                state.position.get(f"VEV_{K}", 0) * self._opt_delta(K, spot, days_remaining)
-                for K in (4000, 4500, 5000, 5100, 5200, 5300, 5400, 5500)
-            )
-            if abs(net_delta) > self.OPT_DELTA_LIMIT:
-                target_delta = self.OPT_DELTA_LIMIT if net_delta > 0 else -self.OPT_DELTA_LIMIT
-                hedge = int(-(net_delta - target_delta))
-                vev_pos   = state.position.get("VELVETFRUIT_EXTRACT", 0)
-                vev_limit = self.POSITION_LIMITS.get("VELVETFRUIT_EXTRACT", 200)
-                hedge = max(-vev_limit - vev_pos, min(vev_limit - vev_pos, hedge))
-                if hedge > 0 and vev_od.sell_orders:
-                    ask = min(vev_od.sell_orders)
-                    qty = min(hedge, -vev_od.sell_orders[ask])
-                    if qty > 0:
-                        result.setdefault("VELVETFRUIT_EXTRACT", []).append(Order("VELVETFRUIT_EXTRACT", int(ask), qty))
-                elif hedge < 0 and vev_od.buy_orders:
-                    bid = max(vev_od.buy_orders)
-                    qty = max(hedge, -vev_od.buy_orders[bid])
-                    if qty < 0:
-                        result.setdefault("VELVETFRUIT_EXTRACT", []).append(Order("VELVETFRUIT_EXTRACT", int(bid), qty))
+        # Delta hedge disabled: option positions are directional leverage on VEV MR,
+        # not neutral MM — the delta exposure is the intended bet.
 
         trader_data_str = json.dumps(trader_data)
         logger.flush(state, result, 0, trader_data_str)
@@ -469,15 +445,6 @@ class Trader:
         orders: List[Order] = []
         buy_cap = limit - pos
         sell_cap = limit + pos
-        intrinsic = max(spot - K, 0.0)
-
-        # Intrinsic arb: buy deep ITM if ask < intrinsic - threshold
-        best_ask = min(od.sell_orders) if od.sell_orders else None
-        if best_ask is not None and best_ask < intrinsic - self.OPT_ITM_ARB_THRESH and buy_cap > 0:
-            qty = min(-od.sell_orders[best_ask], buy_cap, self.OPT_ITM_MAX_SIZE)
-            if qty > 0:
-                orders.append(Order(symbol, int(best_ask), qty))
-                buy_cap -= qty
 
         # Leverage: mirror VEV MR signal via ITM calls (5200, 5300 only)
         if K in (5200, 5300) and vev_fv is not None:
@@ -488,12 +455,12 @@ class Trader:
             diff = desired - pos
             if diff > 0 and buy_cap > 0 and od.sell_orders:
                 ask = min(od.sell_orders)
-                qty = min(diff, buy_cap, -od.sell_orders[ask])
+                qty = min(diff, buy_cap, -od.sell_orders[ask], self.OPT_LEVERAGE_MAX_TRADE)
                 if qty > 0:
                     orders.append(Order(symbol, int(ask), qty))
             elif diff < 0 and sell_cap > 0 and od.buy_orders:
                 bid = max(od.buy_orders)
-                qty = min(-diff, sell_cap, od.buy_orders[bid])
+                qty = min(-diff, sell_cap, od.buy_orders[bid], self.OPT_LEVERAGE_MAX_TRADE)
                 if qty > 0:
                     orders.append(Order(symbol, int(bid), -qty))
 
