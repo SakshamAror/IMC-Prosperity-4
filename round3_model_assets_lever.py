@@ -129,7 +129,7 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     HYDROGEL = True
     VELVETFRUIT = True
-    OPTIONS = True
+    OPTIONS = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # HYDROGEL_PACK - Mean Reversion Strategy
