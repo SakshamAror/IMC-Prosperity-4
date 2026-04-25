@@ -1,5 +1,6 @@
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, List, Dict
+from math import log, sqrt, exp, erf
 import json
 
 
@@ -118,7 +119,6 @@ class Logger:
                 hi = mid - 1
         return out
 
-
 logger = Logger()
 
 
@@ -138,22 +138,62 @@ class Trader:
     ---------
     [R3 v1] Replaced IPR (linear trend) and ACO with HYDROGEL_PACK using the
             same mean-reversion logic. Added empty stubs for VEV options.
+    [R3 v2] Reverted VEV IV signal back to original (buy cheap IV, sell expensive IV).
+            Reversed signal lost 177k; original signal expected to gain ~177k.
     """
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # HYDROGEL_PACK - Mean Reversion Strategy
+    # ──────────────────────────────────────────────────────────────────────────
+    HYDROGEL_FAIR_VALUE = 9990
+    HYDROGEL_MISPRICE_THRESHOLD = 3
+    HYDROGEL_CLIP_RANGE = 8
+    HYDROGEL_SPREAD_OFFSET = 1
+    HYDROGEL_DEVIATION_SCALE = 0.4
+    HYDROGEL_POSITION_SCALE = 12
+    HYDROGEL_TARGET_SCALE = 5   # target_pos = -deviation * 5; deviation=10 → target=±50
+    HYDROGEL_AGGRESSIVE_THRESHOLD = 10
+    HYDROGEL_AGGRESSIVE_SIZE = 40
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # VELVETFRUIT_EXTRACT - Mean Reversion Strategy
+    # ──────────────────────────────────────────────────────────────────────────
+    VEV_FAIR_VALUE = 5250
+    VEV_MISPRICE_THRESHOLD = 3
+    VEV_CLIP_RANGE = 8
+    VEV_SPREAD_OFFSET = 1
+    VEV_DEVIATION_SCALE = 0.4
+    VEV_POSITION_SCALE = 12
+    VEV_TARGET_SCALE = 5
+    VEV_AGGRESSIVE_THRESHOLD = 10
+    VEV_AGGRESSIVE_SIZE = 40
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # VEV_XXXX Options - IV Z-Score Mean Reversion
+    # ──────────────────────────────────────────────────────────────────────────
+    VEV_OPT_T              = 5.0               # fixed; simulation has no time decay, T=5.0 gives most stable IV (std=0.00080)
+    VEV_OPT_EMA_ALPHA      = 0.005             # mean(1 - lag-1 ACF) across 5300/5400/5500 with T=5.0: 0.0066/0.0031/0.0057
+    VEV_OPT_Z_ENTRY        = 2.0               # ~5% of ticks exceed ±2σ; validate with 11c z-score histogram
+    VEV_OPT_Z_EXIT         = 0.5
+    VEV_OPT_SIZE           = 3                 # sized to ~50% of typical L1 depth
+    VEV_OPT_SEED_IV        = {5300: 0.0146, 5400: 0.0137, 5500: 0.0148}   # T=5.0 mean IV per strike
+    VEV_OPT_SEED_VAR       = {5300: 6.4e-7,  5400: 9.2e-7, 5500: 8.0e-7}  # T=5.0 var(IV) per strike; old 0.001 was ~1250x too large
+    VEV_OPT_LIQUID_STRIKES = frozenset({5300, 5400, 5500})  # 5000/5100: spread>4 + 1 trade; 5200: only 15 trades
 
     # TODO: verify all limits from the round 3 wiki before submitting
     POSITION_LIMITS: Dict[str, int] = {
-        "HYDROGEL_PACK":        50,
-        "VELVETFRUIT_EXTRACT":  50,
-        "VEV_4000":             50,
-        "VEV_4500":             50,
-        "VEV_5000":             50,
-        "VEV_5100":             50,
-        "VEV_5200":             50,
-        "VEV_5300":             50,
-        "VEV_5400":             50,
-        "VEV_5500":             50,
-        "VEV_6000":             50,
-        "VEV_6500":             50,
+        "HYDROGEL_PACK":        200,
+        "VELVETFRUIT_EXTRACT":  200,
+        "VEV_4000":             300,
+        "VEV_4500":             300,
+        "VEV_5000":             300,
+        "VEV_5100":             300,
+        "VEV_5200":             300,
+        "VEV_5300":             300,
+        "VEV_5400":             300,
+        "VEV_5500":             300,
+        "VEV_6000":             300,
+        "VEV_6500":             300,
     }
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
@@ -166,6 +206,12 @@ class Trader:
 
         result: Dict[str, List[Order]] = {}
 
+        vev_od = state.order_depths.get("VELVETFRUIT_EXTRACT")
+        if vev_od and vev_od.buy_orders and vev_od.sell_orders:
+            spot = (max(vev_od.buy_orders) + min(vev_od.sell_orders)) / 2
+        else:
+            spot = self.VEV_FAIR_VALUE
+
         for product, od in state.order_depths.items():
             pos   = state.position.get(product, 0)
             limit = self.POSITION_LIMITS.get(product, 50)
@@ -173,9 +219,9 @@ class Trader:
             if product == "HYDROGEL_PACK":
                 result[product] = self._trade_hydrogel(od, pos, limit)
             elif product == "VELVETFRUIT_EXTRACT":
-                result[product] = self._trade_velvetfruit(od, pos, limit, trader_data)
+                result[product] = self._trade_velvetfruit(od, pos, limit)
             elif product.startswith("VEV_"):
-                result[product] = self._trade_vev_option(product, od, pos, limit, trader_data)
+                result[product] = self._trade_vev_option(product, od, pos, limit, spot, trader_data)
             else:
                 result[product] = []
 
@@ -184,91 +230,221 @@ class Trader:
         return result, 0, trader_data_str
 
     # ──────────────────────────────────────────────────────────────────────────
-    # HYDROGEL_PACK — market making around fair value 10000
+    # HYDROGEL_PACK — market making around fair value 9987.5
     # ──────────────────────────────────────────────────────────────────────────
     def _trade_hydrogel(self, od: OrderDepth, pos: int, limit: int) -> List[Order]:
         orders: List[Order] = []
-        FAIR = 10000
 
-        buy_capacity = limit - pos
-        sell_capacity = limit + pos
-
-        best_bid = max(od.buy_orders.keys())  if od.buy_orders  else FAIR - 8
-        best_ask = min(od.sell_orders.keys()) if od.sell_orders else FAIR + 8
+        best_bid = max(od.buy_orders.keys())  if od.buy_orders  else self.HYDROGEL_FAIR_VALUE - self.HYDROGEL_CLIP_RANGE
+        best_ask = min(od.sell_orders.keys()) if od.sell_orders else self.HYDROGEL_FAIR_VALUE + self.HYDROGEL_CLIP_RANGE
         mid = (best_bid + best_ask) / 2
-        deviation = mid - FAIR
+        deviation = mid - self.HYDROGEL_FAIR_VALUE
+
+        # Target position scales with edge: short when above fair, long when below
+        target = int(max(-limit, min(limit, -deviation * self.HYDROGEL_TARGET_SCALE)))
+        buy_capacity  = min(max(0, target - pos), limit - pos)
+        sell_capacity = min(max(0, pos - target), limit + pos)
 
         # 1. Take clear misprices immediately
         if od.sell_orders and buy_capacity > 0:
             for ask_price in sorted(od.sell_orders.keys()):
-                if ask_price >= FAIR - 3:
+                if ask_price >= self.HYDROGEL_FAIR_VALUE - self.HYDROGEL_MISPRICE_THRESHOLD:
                     break
                 qty = min(-od.sell_orders[ask_price], buy_capacity)
                 if qty > 0:
-                    orders.append(Order("HYDROGEL_PACK", ask_price, qty))
+                    orders.append(Order("HYDROGEL_PACK", int(ask_price), qty))
                     buy_capacity -= qty
 
         if od.buy_orders and sell_capacity > 0:
             for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-                if bid_price <= FAIR + 3:
+                if bid_price <= self.HYDROGEL_FAIR_VALUE + self.HYDROGEL_MISPRICE_THRESHOLD:
                     break
                 qty = min(od.buy_orders[bid_price], sell_capacity)
                 if qty > 0:
-                    orders.append(Order("HYDROGEL_PACK", bid_price, -qty))
+                    orders.append(Order("HYDROGEL_PACK", int(bid_price), -qty))
                     sell_capacity -= qty
 
-        # 2. Market making — post inside spread, skewed by position and deviation
+        # 2. Passive quotes toward target
         pos_skew = pos / limit if limit != 0 else 0
-        skew = int(round(deviation * 0.4 + pos_skew * 3))
+        skew = int(round(deviation * self.HYDROGEL_DEVIATION_SCALE + pos_skew * self.HYDROGEL_POSITION_SCALE))
 
-        our_bid = int(best_bid + 1 - skew)
-        our_ask = int(best_ask - 1 - skew)
+        our_bid = int(best_bid + self.HYDROGEL_SPREAD_OFFSET - skew)
+        our_ask = int(best_ask - self.HYDROGEL_SPREAD_OFFSET - skew)
 
-        # Prevent crossing
         if our_bid >= our_ask:
-            our_bid = FAIR - 2
-            our_ask = FAIR + 2
+            our_bid = int(self.HYDROGEL_FAIR_VALUE - 2)
+            our_ask = int(self.HYDROGEL_FAIR_VALUE + 2)
 
-        # Clip to sane range around fair
-        our_bid = max(our_bid, FAIR - 8)
-        our_ask = min(our_ask, FAIR + 8)
-
-        base_size = max(3, min(8, int(2 + abs(deviation))))
+        our_bid = max(our_bid, int(self.HYDROGEL_FAIR_VALUE - self.HYDROGEL_CLIP_RANGE))
+        our_ask = min(our_ask, int(self.HYDROGEL_FAIR_VALUE + self.HYDROGEL_CLIP_RANGE))
 
         if buy_capacity > 0:
-            orders.append(Order("HYDROGEL_PACK", our_bid, min(base_size, buy_capacity)))
+            orders.append(Order("HYDROGEL_PACK", our_bid, buy_capacity))
         if sell_capacity > 0:
-            orders.append(Order("HYDROGEL_PACK", our_ask, -min(base_size, sell_capacity)))
+            orders.append(Order("HYDROGEL_PACK", our_ask, -sell_capacity))
 
-        # 3. Aggressive fade when price is very far from fair
-        if deviation < -10 and buy_capacity > 0:
-            extra = min(buy_capacity, 10)
-            orders.append(Order("HYDROGEL_PACK", best_ask, extra))
-        elif deviation > 10 and sell_capacity > 0:
-            extra = min(sell_capacity, 10)
-            orders.append(Order("HYDROGEL_PACK", best_bid, -extra))
+        # 3. Aggressive hit when deviation is very large
+        if deviation < -self.HYDROGEL_AGGRESSIVE_THRESHOLD and buy_capacity > 0:
+            orders.append(Order("HYDROGEL_PACK", int(best_ask), min(buy_capacity, self.HYDROGEL_AGGRESSIVE_SIZE)))
+        elif deviation > self.HYDROGEL_AGGRESSIVE_THRESHOLD and sell_capacity > 0:
+            orders.append(Order("HYDROGEL_PACK", int(best_bid), -min(sell_capacity, self.HYDROGEL_AGGRESSIVE_SIZE)))
 
         return orders
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VELVETFRUIT_EXTRACT — stub (underlying for VEV options)
-    # TODO: implement once options strategy is finalised in the notebook.
-    # Do NOT trade the underlying directionally alongside options — opaque PnL
-    # attribution (jmerle P2 lesson). Only use for delta hedging if needed.
+    # VELVETFRUIT_EXTRACT — mean reversion around fair value 5250
     # ──────────────────────────────────────────────────────────────────────────
-    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int,
-                           trader_data: dict) -> List[Order]:
-        # TODO: implement delta hedge or market making on the underlying
-        return []
+    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int) -> List[Order]:
+        orders: List[Order] = []
+
+        best_bid = max(od.buy_orders.keys())  if od.buy_orders  else self.VEV_FAIR_VALUE - self.VEV_CLIP_RANGE
+        best_ask = min(od.sell_orders.keys()) if od.sell_orders else self.VEV_FAIR_VALUE + self.VEV_CLIP_RANGE
+        mid = (best_bid + best_ask) / 2
+        deviation = mid - self.VEV_FAIR_VALUE
+
+        target = int(max(-limit, min(limit, -deviation * self.VEV_TARGET_SCALE)))
+        buy_capacity  = min(max(0, target - pos), limit - pos)
+        sell_capacity = min(max(0, pos - target), limit + pos)
+
+        # 1. Take clear misprices immediately
+        if od.sell_orders and buy_capacity > 0:
+            for ask_price in sorted(od.sell_orders.keys()):
+                if ask_price >= self.VEV_FAIR_VALUE - self.VEV_MISPRICE_THRESHOLD:
+                    break
+                qty = min(-od.sell_orders[ask_price], buy_capacity)
+                if qty > 0:
+                    orders.append(Order("VELVETFRUIT_EXTRACT", int(ask_price), qty))
+                    buy_capacity -= qty
+
+        if od.buy_orders and sell_capacity > 0:
+            for bid_price in sorted(od.buy_orders.keys(), reverse=True):
+                if bid_price <= self.VEV_FAIR_VALUE + self.VEV_MISPRICE_THRESHOLD:
+                    break
+                qty = min(od.buy_orders[bid_price], sell_capacity)
+                if qty > 0:
+                    orders.append(Order("VELVETFRUIT_EXTRACT", int(bid_price), -qty))
+                    sell_capacity -= qty
+
+        # 2. Passive quotes toward target
+        pos_skew = pos / limit if limit != 0 else 0
+        skew = int(round(deviation * self.VEV_DEVIATION_SCALE + pos_skew * self.VEV_POSITION_SCALE))
+
+        our_bid = int(best_bid + self.VEV_SPREAD_OFFSET - skew)
+        our_ask = int(best_ask - self.VEV_SPREAD_OFFSET - skew)
+
+        if our_bid >= our_ask:
+            our_bid = int(self.VEV_FAIR_VALUE - 2)
+            our_ask = int(self.VEV_FAIR_VALUE + 2)
+
+        our_bid = max(our_bid, int(self.VEV_FAIR_VALUE - self.VEV_CLIP_RANGE))
+        our_ask = min(our_ask, int(self.VEV_FAIR_VALUE + self.VEV_CLIP_RANGE))
+
+        if buy_capacity > 0:
+            orders.append(Order("VELVETFRUIT_EXTRACT", our_bid, buy_capacity))
+        if sell_capacity > 0:
+            orders.append(Order("VELVETFRUIT_EXTRACT", our_ask, -sell_capacity))
+
+        # 3. Aggressive hit when deviation is very large
+        if deviation < -self.VEV_AGGRESSIVE_THRESHOLD and buy_capacity > 0:
+            orders.append(Order("VELVETFRUIT_EXTRACT", int(best_ask), min(buy_capacity, self.VEV_AGGRESSIVE_SIZE)))
+        elif deviation > self.VEV_AGGRESSIVE_THRESHOLD and sell_capacity > 0:
+            orders.append(Order("VELVETFRUIT_EXTRACT", int(best_bid), -min(sell_capacity, self.VEV_AGGRESSIVE_SIZE)))
+
+        return orders
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VEV_XXXX OPTIONS — stub (IV mean-reversion strategy)
-    # TODO: implement once IV z-score analysis is complete in the notebook.
-    # Primary signal: buy option when per-strike IV z-score < -2,
-    #                 sell option when IV z-score > +2, exit at ±0.5.
+    # VEV_XXXX OPTIONS — IV time-series mean-reversion (liquid strikes only)
+    #
+    # Insight (IV smile plot): liquid strikes 5000-5500 all cluster at IV ~0.20
+    # with tight per-strike bands. The alpha is NOT cross-sectional (smile arb)
+    # but time-series: IV oscillates within a stable range per strike and reverts.
+    # Wings (4000/4500/6000/6500) have structurally elevated IV — exclude.
+    #
+    # TODO: For each liquid strike track rolling IV mean + std in trader_data.
+    #       Buy when IV z-score < -2 (option cheap vs its own history),
+    #       Sell when IV z-score > +2 (option expensive vs its own history),
+    #       Exit at z-score ±0.5.
+    #       Use T=1.0, BS bisection for IV inversion (same as notebook).
     # ──────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _norm_cdf(x: float) -> float:
+        return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+    def _bs_call(self, S: float, K: float, T: float, sigma: float) -> float:
+        if sigma <= 0 or T <= 0:
+            return max(S - K, 0.0)
+        d1 = (log(S / K) + 0.5 * sigma ** 2 * T) / (sigma * sqrt(T))
+        d2 = d1 - sigma * sqrt(T)
+        return S * self._norm_cdf(d1) - K * self._norm_cdf(d2)
+
+    def _implied_vol(self, price: float, S: float, K: float, T: float) -> float:
+        intrinsic = max(S - K, 0.0)
+        if price <= intrinsic:
+            return 0.0
+        lo, hi = 1e-6, 10.0
+        for _ in range(100):
+            mid = (lo + hi) / 2
+            if self._bs_call(S, K, T, mid) > price:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < 1e-6:
+                break
+        return (lo + hi) / 2
+
     def _trade_vev_option(self, symbol: str, od: OrderDepth, pos: int,
-                          limit: int, trader_data: dict) -> List[Order]:
-        # TODO: implement IV z-score strategy
-        return []
+                          limit: int, spot: float, trader_data: dict) -> List[Order]:
+        strike = int(symbol.split("_")[1])
+        if strike not in self.VEV_OPT_LIQUID_STRIKES:
+            return []
+        if not od.buy_orders or not od.sell_orders:
+            return []
+
+        opt_bid = max(od.buy_orders)
+        opt_ask = min(od.sell_orders)
+        opt_mid = (opt_bid + opt_ask) / 2
+
+        try:
+            iv = self._implied_vol(opt_mid, spot, strike, self.VEV_OPT_T)
+        except Exception:
+            return []
+        if iv <= 0:
+            return []
+
+        key_mean = f"iv_mean_{strike}"
+        key_var  = f"iv_var_{strike}"
+        iv_mean = trader_data.get(key_mean, self.VEV_OPT_SEED_IV[strike])
+        iv_var  = trader_data.get(key_var,  self.VEV_OPT_SEED_VAR[strike])
+
+        iv_mean = self.VEV_OPT_EMA_ALPHA * iv + (1 - self.VEV_OPT_EMA_ALPHA) * iv_mean
+        iv_var  = self.VEV_OPT_EMA_ALPHA * (iv - iv_mean) ** 2 + (1 - self.VEV_OPT_EMA_ALPHA) * iv_var
+        trader_data[key_mean] = iv_mean
+        trader_data[key_var]  = iv_var
+
+        iv_std = iv_var ** 0.5
+        if iv_std < 1e-8:
+            return []
+        z = (iv - iv_mean) / iv_std
+
+        orders: List[Order] = []
+
+        if z < -self.VEV_OPT_Z_ENTRY and pos < limit:
+            qty = min(-od.sell_orders[opt_ask], limit - pos, self.VEV_OPT_SIZE)
+            if qty > 0:
+                orders.append(Order(symbol, int(opt_ask), qty))
+        elif z > self.VEV_OPT_Z_ENTRY and pos > -limit:
+            qty = min(od.buy_orders[opt_bid], limit + pos, self.VEV_OPT_SIZE)
+            if qty > 0:
+                orders.append(Order(symbol, int(opt_bid), -qty))
+        elif abs(z) < self.VEV_OPT_Z_EXIT:
+            if pos > 0 and od.buy_orders:
+                qty = min(pos, od.buy_orders[opt_bid], self.VEV_OPT_SIZE)
+                if qty > 0:
+                    orders.append(Order(symbol, int(opt_bid), -qty))
+            elif pos < 0 and od.sell_orders:
+                qty = min(-pos, -od.sell_orders[opt_ask], self.VEV_OPT_SIZE)
+                if qty > 0:
+                    orders.append(Order(symbol, int(opt_ask), qty))
+
+        return [] #orders
 
