@@ -134,36 +134,43 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # HYDROGEL_PACK - Mean Reversion Strategy
     # ──────────────────────────────────────────────────────────────────────────
-    HYDROGEL_FAIR_VALUE = 9990.8
-    HYDROGEL_MISPRICE_THRESHOLD = 6       # halved: fire on smaller misprices
+    HYDROGEL_FAIR_VALUE = 9995.13
+    HYDROGEL_MISPRICE_THRESHOLD = 4       # halved: fire on smaller misprices
     HYDROGEL_CLIP_RANGE = 100
     HYDROGEL_SPREAD_OFFSET = 1
-    HYDROGEL_DEVIATION_SCALE = 0.4
-    HYDROGEL_POSITION_SCALE = 5           # reduced: less skew → quotes stay tight → more fills
-    HYDROGEL_TARGET_SCALE = 7             # doubled: larger targets → more position cycling
-    HYDROGEL_AGGRESSIVE_THRESHOLD = 30
+    HYDROGEL_DEVIATION_SCALE = 0.69
+    HYDROGEL_POSITION_SCALE = 4           # reduced: less skew → quotes stay tight → more fills
+    HYDROGEL_TARGET_SCALE = 4             # doubled: larger targets → more position cycling
+    HYDROGEL_AGGRESSIVE_THRESHOLD = 40
     HYDROGEL_AGGRESSIVE_SIZE = 40
-    HYDROGEL_WARMUP_TICKS = 25_000         # faster ramp: start trading at full scale sooner
+    HYDROGEL_WARMUP_TICKS = 4490        # faster ramp: start trading at full scale sooner
 
     # ──────────────────────────────────────────────────────────────────────────
     # VELVETFRUIT_EXTRACT - Mean Reversion Strategy
     # ──────────────────────────────────────────────────────────────────────────
-    VEV_FAIR_VALUE = 5250
-    VEV_MISPRICE_THRESHOLD = 4            # halved
+    VEV_FAIR_VALUE = 5248.39
+    VEV_MISPRICE_THRESHOLD = 5            # halved
     VEV_CLIP_RANGE = 60
     VEV_SPREAD_OFFSET = 1
-    VEV_DEVIATION_SCALE = 0.4
-    VEV_POSITION_SCALE = 2                # reduced: less inventory skew → more fills
-    VEV_TARGET_SCALE = 8                  # doubled
+    VEV_DEVIATION_SCALE = 0.61
+    VEV_POSITION_SCALE = 1                # reduced: less inventory skew → more fills
+    VEV_TARGET_SCALE = 11                  # doubled
     VEV_AGGRESSIVE_THRESHOLD = 30
     VEV_AGGRESSIVE_SIZE = 40
+    VEV_WARMUP_TICKS = 772             # warmup matching HYDROGEL
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VEV_XXXX Options - Mean Reversion on all liquid strikes
+    # VEV_XXXX Options - Static FV market-making
+    # Historical FVs calibrated at TTE≈7d (sigma=0.20, S=5250).
+    # Live FVs recalibrated at TTE=5d (sigma=0.20, S=5250) via Black-Scholes.
+    # Deep ITM (4000, 4500) unchanged — dominated by intrinsic value.
+    # SET LIVE_SUBMISSION=True BEFORE submitting to live round.
     # Per-strike: (fair_value, misprice_threshold, clip_range, agg_dev_threshold)
     # ──────────────────────────────────────────────────────────────────────────
-    OPT_MR_STRIKES = {
-        4000: (1250.1,  5, 60, 25),       # thresholds halved throughout
+    LIVE_SUBMISSION = False   # ← flip to True for live round (TTE starts at 5d)
+
+    _OPT_HIST = {             # backtest: TTE≈7d
+        4000: (1250.1,  5, 60, 25),
         4500: ( 750.1,  4, 60, 20),
         5000: ( 255.0,  1, 40, 15),
         5100: ( 166.8,  1, 30, 10),
@@ -172,12 +179,23 @@ class Trader:
         5400: (  15.95, 1, 15,  5),
         5500: (   6.64, 1,  6,  3),
     }
-    OPT_TARGET_SCALE    = 10              # increased: larger targets → more capacity
+    _OPT_LIVE = {             # live: ~50% theta correction toward TTE=5d (conservative)
+        4000: (1250.1,  5, 60, 25),   # deep ITM — unchanged
+        4500: ( 750.1,  4, 60, 20),   # deep ITM — unchanged
+        5000: ( 254.0,  1, 40, 15),   # -1.0  (~0.5 day theta)
+        5100: ( 164.5,  1, 30, 10),   # -2.3  (~0.5 day theta)
+        5200: (  91.0,  1, 20,  8),   # -4.6  (~0.5 day theta)
+        5300: (  42.0,  1, 12,  6),   # -4.8  (~0.5 day theta)
+        5400: (  14.2,  1, 15,  5),   # -1.75 (~0.5 day theta)
+        5500: (   5.0,  1,  6,  3),   # -1.64 (~0.5 day theta)
+    }
+    OPT_MR_STRIKES = _OPT_LIVE if LIVE_SUBMISSION else _OPT_HIST
+    OPT_TARGET_SCALE    = 11              # increased: larger targets → more capacity
     OPT_SPREAD_OFFSET   = 1
-    OPT_DEVIATION_SCALE = 0.4
+    OPT_DEVIATION_SCALE = 0.24
     OPT_POSITION_SCALE  = 2              # reduced: less skew → more passive fills
     OPT_AGGRESSIVE_SIZE = 5              # enabled: fade large moves aggressively
-    OPT_WARMUP_TICKS    = 45_000          # faster ramp matching HYDROGEL_WARMUP_TICKS
+    OPT_WARMUP_TICKS    = 2510          # faster ramp matching HYDROGEL_WARMUP_TICKS
 
     POSITION_LIMITS: Dict[str, int] = {
         "HYDROGEL_PACK":        200,
@@ -226,7 +244,7 @@ class Trader:
             if product == "HYDROGEL_PACK":
                 result[product] = self._trade_hydrogel(od, pos, limit, state.timestamp)
             elif product == "VELVETFRUIT_EXTRACT":
-                result[product] = self._trade_velvetfruit(od, pos, limit)
+                result[product] = self._trade_velvetfruit(od, pos, limit, state.timestamp)
             elif product.startswith("VEV_"):
                 result[product] = self._trade_vev_option(product, od, pos, limit, spot, state.timestamp)
             else:
@@ -297,7 +315,7 @@ class Trader:
         elif deviation > self.HYDROGEL_AGGRESSIVE_THRESHOLD and sell_capacity > 0:
             orders.append(Order("HYDROGEL_PACK", int(best_bid), -min(sell_capacity, self.HYDROGEL_AGGRESSIVE_SIZE)))
 
-        # ── Penny-jump remaining capacity ──────────────────────────────────────
+        # ── Penny-jump + join remaining capacity ───────────────────────────────
         if od.buy_orders and od.sell_orders:
             buys_placed  = sum(o.quantity for o in orders if o.quantity > 0)
             sells_placed = sum(-o.quantity for o in orders if o.quantity < 0)
@@ -306,17 +324,22 @@ class Trader:
             pj_bid  = int(best_bid + 1)
             pj_ask  = int(best_ask - 1)
             if pj_bid < pj_ask:
-                if mm_buy > 0:
-                    orders.append(Order("HYDROGEL_PACK", pj_bid, mm_buy))
-                if mm_sell > 0:
-                    orders.append(Order("HYDROGEL_PACK", pj_ask, -mm_sell))
+                pj_buy,  join_buy  = mm_buy  // 2, mm_buy  - mm_buy  // 2
+                pj_sell, join_sell = mm_sell // 2, mm_sell - mm_sell // 2
+                if pj_buy   > 0: orders.append(Order("HYDROGEL_PACK", pj_bid,          pj_buy))
+                if pj_sell  > 0: orders.append(Order("HYDROGEL_PACK", pj_ask,         -pj_sell))
+                if join_buy  > 0: orders.append(Order("HYDROGEL_PACK", int(best_bid),  join_buy))
+                if join_sell > 0: orders.append(Order("HYDROGEL_PACK", int(best_ask), -join_sell))
+            else:
+                if mm_buy  > 0: orders.append(Order("HYDROGEL_PACK", int(best_bid),  mm_buy))
+                if mm_sell > 0: orders.append(Order("HYDROGEL_PACK", int(best_ask), -mm_sell))
 
         return orders
 
     # ──────────────────────────────────────────────────────────────────────────
     # VELVETFRUIT_EXTRACT
     # ──────────────────────────────────────────────────────────────────────────
-    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int) -> List[Order]:
+    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0) -> List[Order]:
         if not self.VELVETFRUIT: return []
 
         orders: List[Order] = []
@@ -326,7 +349,9 @@ class Trader:
         mid = (best_bid + best_ask) / 2
         deviation = mid - self.VEV_FAIR_VALUE
 
-        target = int(max(-limit, min(limit, -deviation * self.VEV_TARGET_SCALE)))
+        ramp = min(1.0, timestamp / self.VEV_WARMUP_TICKS) if self.VEV_WARMUP_TICKS > 0 else 1.0
+        effective_target_scale = self.VEV_TARGET_SCALE * ramp
+        target = int(max(-limit, min(limit, -deviation * effective_target_scale)))
         buy_capacity  = min(max(0, target - pos), limit - pos)
         sell_capacity = min(max(0, pos - target), limit + pos)
 
@@ -371,7 +396,7 @@ class Trader:
         elif deviation > self.VEV_AGGRESSIVE_THRESHOLD and sell_capacity > 0:
             orders.append(Order("VELVETFRUIT_EXTRACT", int(best_bid), -min(sell_capacity, self.VEV_AGGRESSIVE_SIZE)))
 
-        # ── Penny-jump remaining capacity ──────────────────────────────────────
+        # ── Penny-jump + join remaining capacity ───────────────────────────────
         if od.buy_orders and od.sell_orders:
             buys_placed  = sum(o.quantity for o in orders if o.quantity > 0)
             sells_placed = sum(-o.quantity for o in orders if o.quantity < 0)
@@ -380,10 +405,15 @@ class Trader:
             pj_bid  = int(best_bid + 1)
             pj_ask  = int(best_ask - 1)
             if pj_bid < pj_ask:
-                if mm_buy > 0:
-                    orders.append(Order("VELVETFRUIT_EXTRACT", pj_bid, mm_buy))
-                if mm_sell > 0:
-                    orders.append(Order("VELVETFRUIT_EXTRACT", pj_ask, -mm_sell))
+                pj_buy,  join_buy  = mm_buy  // 2, mm_buy  - mm_buy  // 2
+                pj_sell, join_sell = mm_sell // 2, mm_sell - mm_sell // 2
+                if pj_buy   > 0: orders.append(Order("VELVETFRUIT_EXTRACT", pj_bid,          pj_buy))
+                if pj_sell  > 0: orders.append(Order("VELVETFRUIT_EXTRACT", pj_ask,         -pj_sell))
+                if join_buy  > 0: orders.append(Order("VELVETFRUIT_EXTRACT", int(best_bid),  join_buy))
+                if join_sell > 0: orders.append(Order("VELVETFRUIT_EXTRACT", int(best_ask), -join_sell))
+            else:
+                if mm_buy  > 0: orders.append(Order("VELVETFRUIT_EXTRACT", int(best_bid),  mm_buy))
+                if mm_sell > 0: orders.append(Order("VELVETFRUIT_EXTRACT", int(best_ask), -mm_sell))
 
         return orders
 
@@ -454,7 +484,7 @@ class Trader:
         elif deviation > agg_thresh and sell_capacity > 0:
             orders.append(Order(symbol, int(best_bid), -min(sell_capacity, self.OPT_AGGRESSIVE_SIZE)))
 
-        # ── Penny-jump remaining capacity ──────────────────────────────────────
+        # ── Penny-jump + join remaining capacity ───────────────────────────────
         if od.buy_orders and od.sell_orders:
             buys_placed  = sum(o.quantity for o in orders if o.quantity > 0)
             sells_placed = sum(-o.quantity for o in orders if o.quantity < 0)
@@ -463,10 +493,15 @@ class Trader:
             pj_bid  = max(1, int(best_bid + 1))
             pj_ask  = int(best_ask - 1)
             if pj_bid < pj_ask:
-                if mm_buy > 0:
-                    orders.append(Order(symbol, pj_bid, mm_buy))
-                if mm_sell > 0:
-                    orders.append(Order(symbol, pj_ask, -mm_sell))
+                pj_buy,  join_buy  = mm_buy  // 2, mm_buy  - mm_buy  // 2
+                pj_sell, join_sell = mm_sell // 2, mm_sell - mm_sell // 2
+                if pj_buy   > 0: orders.append(Order(symbol, pj_bid,          pj_buy))
+                if pj_sell  > 0: orders.append(Order(symbol, pj_ask,         -pj_sell))
+                if join_buy  > 0: orders.append(Order(symbol, int(best_bid),  join_buy))
+                if join_sell > 0: orders.append(Order(symbol, int(best_ask), -join_sell))
+            else:
+                if mm_buy  > 0: orders.append(Order(symbol, max(1, int(best_bid)),  mm_buy))
+                if mm_sell > 0: orders.append(Order(symbol, int(best_ask),         -mm_sell))
 
         return orders
 
