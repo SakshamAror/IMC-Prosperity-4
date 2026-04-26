@@ -190,9 +190,10 @@ class Trader:
         5500: (   5.0,  1,  6,  3),   # -1.64 (~0.5 day theta)
     }
     OPT_MR_STRIKES = _OPT_LIVE if LIVE_SUBMISSION else _OPT_HIST
+
     OPT_TARGET_SCALE    = 11              # increased: larger targets → more capacity
     OPT_SPREAD_OFFSET   = 1
-    OPT_DEVIATION_SCALE = 0.24
+    OPT_DEVIATION_SCALE = 23    # relative: applied to deviation/fv so skew is proportional across strikes
     OPT_POSITION_SCALE  = 2              # reduced: less skew → more passive fills
     OPT_AGGRESSIVE_SIZE = 5              # enabled: fade large moves aggressively
     OPT_WARMUP_TICKS    = 2510          # faster ramp matching HYDROGEL_WARMUP_TICKS
@@ -462,7 +463,7 @@ class Trader:
                     sell_capacity -= qty
 
         pos_skew = pos / limit if limit != 0 else 0
-        skew = int(round(deviation * self.OPT_DEVIATION_SCALE + pos_skew * self.OPT_POSITION_SCALE))
+        skew = int(round((deviation / fv) * self.OPT_DEVIATION_SCALE + pos_skew * self.OPT_POSITION_SCALE))
 
         our_bid = int(best_bid + self.OPT_SPREAD_OFFSET - skew)
         our_ask = int(best_ask - self.OPT_SPREAD_OFFSET - skew)
