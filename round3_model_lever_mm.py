@@ -190,6 +190,7 @@ class Trader:
         5500: (   5.0,  1,  6,  3),   # -1.64 (~0.5 day theta)
     }
     OPT_MR_STRIKES = _OPT_LIVE if LIVE_SUBMISSION else _OPT_HIST
+
     OPT_TARGET_SCALE    = 11              # increased: larger targets → more capacity
     OPT_SPREAD_OFFSET   = 1
     OPT_DEVIATION_SCALE = 0.24
