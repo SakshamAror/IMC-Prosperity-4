@@ -127,9 +127,9 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # ITEM TOGGLES
     # ──────────────────────────────────────────────────────────────────────────
-    HYDROGEL = True
+    HYDROGEL = False
     VELVETFRUIT = True
-    OPTIONS = True
+    OPTIONS = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # HYDROGEL_PACK - Mean Reversion Strategy
