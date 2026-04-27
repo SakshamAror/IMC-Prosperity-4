@@ -167,7 +167,7 @@ class Trader:
     # SET LIVE_SUBMISSION=True BEFORE submitting to live round.
     # Per-strike: (fair_value, misprice_threshold, clip_range, agg_dev_threshold)
     # ──────────────────────────────────────────────────────────────────────────
-    LIVE_SUBMISSION = False   # ← flip to True for live round (TTE starts at 5d)
+    LIVE_SUBMISSION = True   # ← flip to True for live round (TTE starts at 5d)
 
     _OPT_HIST = {             # backtest: TTE≈7d
         4000: (1250.1,  5, 60, 25),
@@ -505,4 +505,3 @@ class Trader:
                 if mm_sell > 0: orders.append(Order(symbol, int(best_ask),         -mm_sell))
 
         return orders
-
