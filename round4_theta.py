@@ -127,9 +127,9 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # ITEM TOGGLES
     # ──────────────────────────────────────────────────────────────────────────
-    HYDROGEL = True
+    HYDROGEL = False
     VELVETFRUIT = True
-    OPTIONS = True
+    OPTIONS = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # HYDROGEL_PACK - Mean Reversion Strategy
@@ -157,7 +157,7 @@ class Trader:
     VEV_TARGET_SCALE = 11                  # doubled
     VEV_AGGRESSIVE_THRESHOLD = 30
     VEV_AGGRESSIVE_SIZE = 40
-    VEV_WARMUP_TICKS = 772             # warmup matching HYDROGEL
+    VEV_WARMUP_TICKS = 772       
 
     # 4-day means (R3d0, R4d1, R4d2, R4d3). (fair_value, threshold, clip, agg_thresh)
     _OPT_PARAMS = {
@@ -172,15 +172,15 @@ class Trader:
     }
     OPT_MR_STRIKES = _OPT_PARAMS
 
-    # Theta model: FV = C * ln(TTE) for OTM strikes; fitted from ROUND_3 (TTE 8,7,6)
-    # R4 Day 1 starts at TTE=7, decrements each day
-    OPT_STARTING_TTE = 7
+    TIME_TO_EXPIRY = 6
+    _current_tte: int = None   # set on first tick
+    _opt_fvs: dict = None      # set on first tick, recomputed at end of each day
     _OPT_THETA_C = {
-        5100: 85.7182,
-        5200: 49.1391,
-        5300: 24.0830,
-        5400:  8.2565,
-        5500:  3.4476,
+        5100: 86.0532,
+        5200: 49.1043,
+        5300: 23.9030,
+        5400:  8.1263,
+        5500:  3.3581,
     }
 
     OPT_TARGET_SCALE    = 11              # increased: larger targets → more capacity
@@ -189,6 +189,18 @@ class Trader:
     OPT_POSITION_SCALE  = 2              # reduced: less skew → more passive fills
     OPT_AGGRESSIVE_SIZE = 5              # enabled: fade large moves aggressively
     OPT_WARMUP_TICKS    = 2510          # faster ramp matching HYDROGEL_WARMUP_TICKS
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # MARK 67 signal — dip-buyer; bias VEV fair value upward when it fires
+    # Mark 67 buys after price dips (95.8% hit rate), suggesting mean reversion.
+    # Bonus weight when counterparty is a known net seller (Mark 49 or Mark 22).
+    # Signal decays each tick; resets at end of each day.
+    # ──────────────────────────────────────────────────────────────────────────
+    M67_SIGNAL_SCALE: float = 0.35   
+    M67_DECAY:        float = 0.2  # per-tick decay (half-life ~693 ticks / ~69k ts)
+    M67_SELLERS             = {"Mark 22", "Mark 49"} #{"Mark 49", "Mark 22"}  # known net sellers → stronger signal
+    _m67_signal:      float = 0.0
+    _m67_last_ts:     int   = 0
 
     POSITION_LIMITS: Dict[str, int] = {
         "HYDROGEL_PACK":        200,
@@ -213,22 +225,35 @@ class Trader:
             except Exception:
                 trader_data = {}
 
-        # ── Day tracking (absolute timestamps: day N = [N*1_000_000, (N+1)*1_000_000)) ──
-        day_index  = state.timestamp // 1_000_000
-        prev_day   = trader_data.get("day_index", -1)
-        day_changed = day_index != prev_day
-        trader_data["day_index"] = day_index
-
-        # ── OTM option FVs: update on day change or first run ─────────────────
-        if day_changed or "opt_fvs" not in trader_data:
-            current_tte = max(1, self.OPT_STARTING_TTE - day_index)
-            trader_data["opt_fvs"] = {
-                str(K): C * log(current_tte)
-                for K, C in self._OPT_THETA_C.items()
-            }
+        # ── OTM option FVs: instance vars persist across ticks without traderData ──
+        if self._current_tte is None:
+            self._current_tte = self.TIME_TO_EXPIRY
+            self._opt_fvs = {K: C * log(self._current_tte) for K, C in self._OPT_THETA_C.items()}
             # DEBUG: remove before final submission
-            logger.print(f"[THETA] day_index={day_index} TTE={current_tte} fvs={ {k: round(v,2) for k,v in trader_data['opt_fvs'].items()} }")
-        opt_fvs: dict = trader_data["opt_fvs"]
+            logger.print(f"[THETA] init TTE={self._current_tte} fvs={ {k: round(v,2) for k,v in self._opt_fvs.items()} }")
+
+        if state.timestamp == 999900:
+            self._current_tte = max(1, self._current_tte - 1)
+            self._opt_fvs = {K: C * log(self._current_tte) for K, C in self._OPT_THETA_C.items()}
+            # DEBUG: remove before final submission
+            logger.print(f"[THETA] end-of-day → TTE={self._current_tte} fvs={ {k: round(v,2) for k,v in self._opt_fvs.items()} }")
+            self._m67_signal = 0.0  # reset signal at day boundary
+
+        opt_fvs: dict = self._opt_fvs
+
+        # ── Mark 67 dip-buyer signal → VEV fair value bias ─────────────────────
+        ts = state.timestamp
+        ticks_elapsed = max(0, ts - self._m67_last_ts) // 100
+        if ticks_elapsed > 0:
+            self._m67_signal *= self.M67_DECAY ** ticks_elapsed
+        self._m67_last_ts = ts
+
+        for t in state.market_trades.get("VELVETFRUIT_EXTRACT", []):
+            if t.buyer == "Mark 67":
+                bonus = 0.5 if t.seller in self.M67_SELLERS else 0.0
+                self._m67_signal += (1.0 + bonus) * t.quantity
+
+        vev_fv_bias = self._m67_signal * self.M67_SIGNAL_SCALE
 
         # ── Spot price ─────────────────────────────────────────────────────────
         vev_od = state.order_depths.get("VELVETFRUIT_EXTRACT")
@@ -246,10 +271,10 @@ class Trader:
             if product == "HYDROGEL_PACK":
                 result[product] = self._trade_hydrogel(od, pos, limit, state.timestamp)
             elif product == "VELVETFRUIT_EXTRACT":
-                result[product] = self._trade_velvetfruit(od, pos, limit, state.timestamp)
+                result[product] = self._trade_velvetfruit(od, pos, limit, state.timestamp, vev_fv_bias)
             elif product.startswith("VEV_"):
                 K = int(product.split("_")[1])
-                fv_override = opt_fvs.get(str(K))  # None for ATM/ITM strikes
+                fv_override = opt_fvs.get(K)  # None for ATM/ITM strikes
                 result[product] = self._trade_vev_option(product, od, pos, limit, spot, state.timestamp, fv_override)
             else:
                 result[product] = []
@@ -343,15 +368,16 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # VELVETFRUIT_EXTRACT
     # ──────────────────────────────────────────────────────────────────────────
-    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0) -> List[Order]:
+    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0, fv_bias: float = 0.0) -> List[Order]:
         if not self.VELVETFRUIT: return []
 
         orders: List[Order] = []
+        fv = self.VEV_FAIR_VALUE + fv_bias
 
-        best_bid = max(od.buy_orders.keys())  if od.buy_orders  else self.VEV_FAIR_VALUE - self.VEV_CLIP_RANGE
-        best_ask = min(od.sell_orders.keys()) if od.sell_orders else self.VEV_FAIR_VALUE + self.VEV_CLIP_RANGE
+        best_bid = max(od.buy_orders.keys())  if od.buy_orders  else fv - self.VEV_CLIP_RANGE
+        best_ask = min(od.sell_orders.keys()) if od.sell_orders else fv + self.VEV_CLIP_RANGE
         mid = (best_bid + best_ask) / 2
-        deviation = mid - self.VEV_FAIR_VALUE
+        deviation = mid - fv
 
         ramp = min(1.0, timestamp / self.VEV_WARMUP_TICKS) if self.VEV_WARMUP_TICKS > 0 else 1.0
         effective_target_scale = self.VEV_TARGET_SCALE * ramp
@@ -361,7 +387,7 @@ class Trader:
 
         if od.sell_orders and buy_capacity > 0:
             for ask_price in sorted(od.sell_orders.keys()):
-                if ask_price >= self.VEV_FAIR_VALUE - self.VEV_MISPRICE_THRESHOLD:
+                if ask_price >= fv - self.VEV_MISPRICE_THRESHOLD:
                     break
                 qty = min(-od.sell_orders[ask_price], buy_capacity)
                 if qty > 0:
@@ -370,7 +396,7 @@ class Trader:
 
         if od.buy_orders and sell_capacity > 0:
             for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-                if bid_price <= self.VEV_FAIR_VALUE + self.VEV_MISPRICE_THRESHOLD:
+                if bid_price <= fv + self.VEV_MISPRICE_THRESHOLD:
                     break
                 qty = min(od.buy_orders[bid_price], sell_capacity)
                 if qty > 0:
@@ -384,11 +410,11 @@ class Trader:
         our_ask = int(best_ask - self.VEV_SPREAD_OFFSET - skew)
 
         if our_bid >= our_ask:
-            our_bid = int(self.VEV_FAIR_VALUE - 2)
-            our_ask = int(self.VEV_FAIR_VALUE + 2)
+            our_bid = int(fv - 2)
+            our_ask = int(fv + 2)
 
-        our_bid = max(our_bid, int(self.VEV_FAIR_VALUE - self.VEV_CLIP_RANGE))
-        our_ask = min(our_ask, int(self.VEV_FAIR_VALUE + self.VEV_CLIP_RANGE))
+        our_bid = max(our_bid, int(fv - self.VEV_CLIP_RANGE))
+        our_ask = min(our_ask, int(fv + self.VEV_CLIP_RANGE))
 
         if buy_capacity > 0:
             orders.append(Order("VELVETFRUIT_EXTRACT", our_bid, buy_capacity))
