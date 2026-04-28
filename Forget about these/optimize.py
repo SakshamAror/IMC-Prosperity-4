@@ -1,34 +1,56 @@
 """
-Random search optimizer for round3_model_lever_mm.py.
-Trains on days 1 and 2. Day 0 held out for overfitting check.
+Random search optimizer for round4_EMA.py.
+Trains on ROUND_3 days 0, 1, 2.  Day 3 in ROUND_4 held out for validation.
 
 Run with:
     .venv/bin/python -u optimize.py
 The -u flag disables output buffering so you see progress in real time.
 """
 import sys, random, time
-sys.stdout.reconfigure(line_buffering=True)   # flush after every line
+sys.stdout.reconfigure(line_buffering=True)
+sys.path.insert(0, '.venv/lib/python3.14/site-packages')
 sys.path.insert(0, '.venv/lib/python3.14/site-packages/prosperity4bt')
 
 import importlib.util
-from prosperity4bt.runner import run_backtest
-from prosperity4bt.file_reader import FileSystemReader
-from prosperity4bt.models import TradeMatchingMode
+from contextlib import contextmanager
 from pathlib import Path
+from prosperity4bt.runner import run_backtest
+from prosperity4bt.file_reader import FileReader
+from prosperity4bt.models import TradeMatchingMode
 
-# ── Load base trader ──────────────────────────────────────────────────────────
-spec = importlib.util.spec_from_file_location('trader_mod', 'round3_model_lever_mm.py')
+# ── Custom file reader mapping round{N} -> ROUND_{N}/ ─────────────────────────
+@contextmanager
+def _cm(val):
+    yield val
+
+class RoundFileReader(FileReader):
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def file(self, path_parts):
+        # path_parts = ['round3', 'prices_round_3_day_0.csv']
+        round_folder = path_parts[0]          # 'round3' or 'round4'
+        n = round_folder[5:]                  # '3' or '4'
+        fname = path_parts[-1]
+        p = self._base / f"ROUND_{n}" / fname
+        if not p.is_file():
+            return _cm(None)
+        return _cm(p)
+
+# ── Load base trader ───────────────────────────────────────────────────────────
+spec = importlib.util.spec_from_file_location('trader_mod', 'round4_22.py')
 BASE_MOD = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(BASE_MOD)
 BaseTrader = BASE_MOD.Trader
 
-FR  = FileSystemReader(Path('backtests'))
+BASE_DIR = Path('.')
+FR  = RoundFileReader(BASE_DIR)
 TMM = TradeMatchingMode.all
 
-TRAIN_DAYS = [1, 2]
-VAL_DAYS   = [0]
+TRAIN_DAYS = [(3, 0), (3, 1), (3, 2)]   # (round, day)
+VAL_DAYS   = [(4, 3)]
 
-# ── PnL extraction ────────────────────────────────────────────────────────────
+# ── PnL extraction ─────────────────────────────────────────────────────────────
 def get_pnl(result):
     final = {}
     for row in result.activity_logs:
@@ -38,62 +60,51 @@ def get_pnl(result):
 
 def eval_trader(trader_cls, days):
     total = 0
-    for day in days:
-        result = run_backtest(trader_cls(), FR, 3, day, False, TMM, False, False)
+    for round_num, day_num in days:
+        trader = trader_cls()
+        result = run_backtest(trader, FR, round_num, day_num, False, TMM, False, False)
         total += get_pnl(result)
     return total
 
-# ── Parameter search space ────────────────────────────────────────────────────
+# ── Parameter search space ─────────────────────────────────────────────────────
 # (lo, hi, type)  type: 'float' | 'int'
 SPACE = {
-    # HYDROGEL
-    'HYDROGEL_FAIR_VALUE':           (9984.0, 9996.0, 'float'),
-    'HYDROGEL_MISPRICE_THRESHOLD':   (3,      10,     'int'),
-    'HYDROGEL_TARGET_SCALE':         (4,      14,     'int'),
-    'HYDROGEL_POSITION_SCALE':       (2,      9,      'int'),
-    'HYDROGEL_DEVIATION_SCALE':      (0.2,    0.8,    'float'),
-    'HYDROGEL_WARMUP_TICKS':         (0,      5000,   'int'),
-    'HYDROGEL_AGGRESSIVE_THRESHOLD': (15,     50,     'int'),
-    # VELVETFRUIT
-    'VEV_FAIR_VALUE':                (5245.0, 5257.0, 'float'),
-    'VEV_MISPRICE_THRESHOLD':        (2,      8,      'int'),
-    'VEV_TARGET_SCALE':              (3,      14,     'int'),
-    'VEV_POSITION_SCALE':            (1,      6,      'int'),
-    'VEV_DEVIATION_SCALE':           (0.2,    0.8,    'float'),
-    'VEV_WARMUP_TICKS':              (0,      3000,   'int'),
-    # OPTIONS
-    'OPT_TARGET_SCALE':              (5,      20,     'int'),
-    'OPT_POSITION_SCALE':            (1,      5,      'int'),
-    'OPT_DEVIATION_SCALE':           (0.2,    0.8,    'float'),
-    'OPT_WARMUP_TICKS':              (0,      5000,   'int'),
+    # HYDROGEL vol-adaptive sizing
+    'HYD_VOL_WINDOW':    (5,    50,   'int'),
+    'HYD_VOL_MIN_RATIO': (0.20, 0.90, 'float'),
+    'HYD_VOL_MAX_RATIO': (1.20, 4.00, 'float'),
+    # VELVETFRUIT vol-adaptive sizing
+    'VEV_VOL_WINDOW':    (5,    50,   'int'),
+    'VEV_VOL_MIN_RATIO': (0.20, 0.90, 'float'),
+    'VEV_VOL_MAX_RATIO': (1.20, 4.00, 'float'),
 }
 
 def sample():
     p = {}
     for k, (lo, hi, t) in SPACE.items():
-        p[k] = random.randint(lo, hi) if t == 'int' else round(random.uniform(lo, hi), 2)
+        p[k] = random.randint(lo, hi) if t == 'int' else round(random.uniform(lo, hi), 3)
     return p
 
 def make_trader(params):
-    return type('T', (BaseTrader,), params)
+    attrs = {k: params[k] for k in SPACE}
+    return type('T', (BaseTrader,), attrs)
 
-# ── Baseline ──────────────────────────────────────────────────────────────────
+# ── Baseline ───────────────────────────────────────────────────────────────────
 print("Computing baseline (current params)...", flush=True)
-print("  Running day 1...", flush=True)
-baseline_train  = eval_trader(BaseTrader, [1])
-print("  Running day 2...", flush=True)
-baseline_train += eval_trader(BaseTrader, [2])
-print("  Running day 0 (val)...", flush=True)
-baseline_val    = eval_trader(BaseTrader, VAL_DAYS)
-print(f"  Train (days 1+2): {baseline_train:,.0f}")
-print(f"  Val   (day 0):    {baseline_val:,.0f}")
+for round_num, day_num in TRAIN_DAYS:
+    print(f"  Running round {round_num} day {day_num}...", flush=True)
+baseline_train = eval_trader(BaseTrader, TRAIN_DAYS)
+print(f"  Running round 4 day 3 (val)...", flush=True)
+baseline_val   = eval_trader(BaseTrader, VAL_DAYS)
+print(f"  Train (R3 days 0+1+2): {baseline_train:,.0f}")
+print(f"  Val   (R4 day 3):      {baseline_val:,.0f}")
 print()
 
-# ── Random search ─────────────────────────────────────────────────────────────
-N = 400
+# ── Random search ──────────────────────────────────────────────────────────────
+N = 300
 results = []  # [(train_pnl, params)]
 
-print(f"Running {N} random trials on days 1+2  (one dot = 1 trial)...")
+print(f"Running {N} random trials on R3 days 0+1+2  (one dot = 1 trial)...")
 print(f"  Legend:  . = trial done  | = checkpoint every 10  * = new best")
 print(f"  ", end="", flush=True)
 t0 = time.time()
@@ -102,21 +113,22 @@ best_so_far = float('-inf')
 for i in range(N):
     params = sample()
     try:
-        pnl = eval_trader(make_trader(params), TRAIN_DAYS)
+        trader_cls = make_trader(params)
+        pnl = eval_trader(trader_cls, TRAIN_DAYS)
         results.append((pnl, params))
         is_best = pnl > best_so_far
         if is_best:
             best_so_far = pnl
-        at_checkpoint = (i + 1) % 50 == 0
         marker = "*" if is_best else ("|" if (i + 1) % 10 == 0 else ".")
+        at_checkpoint = (i + 1) % 50 == 0
         print(marker, end="" if not at_checkpoint else "\n", flush=True)
     except Exception as e:
         print("E", end="", flush=True)
 
     if (i + 1) % 50 == 0:
         elapsed = time.time() - t0
-        rate = elapsed / (i + 1)
-        eta  = rate * (N - i - 1)
+        rate    = elapsed / (i + 1)
+        eta     = rate * (N - i - 1)
         print(f"  [{i+1:3d}/{N}]  best={best_so_far:,.0f}  "
               f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s", flush=True)
         print(f"  ", end="", flush=True)
@@ -126,36 +138,39 @@ results.sort(key=lambda x: x[0], reverse=True)
 elapsed = time.time() - t0
 print(f"\nDone in {elapsed:.0f}s  ({elapsed/N:.2f}s per trial)")
 
-# ── Report top results ────────────────────────────────────────────────────────
+# ── Report top results ─────────────────────────────────────────────────────────
 TOP_K = 10
 print(f"\n{'='*70}")
-print(f"TOP {TOP_K} RESULTS (train = days 1+2)")
+print(f"TOP {TOP_K} RESULTS (train = R3 days 0+1+2)")
 print(f"{'='*70}")
+
+base_params = {k: getattr(BaseTrader, k, None) for k in SPACE}
+
 for rank, (pnl, params) in enumerate(results[:TOP_K], 1):
     print(f"\n#{rank}  Train PnL: {pnl:,.0f}  (baseline: {baseline_train:,.0f})")
     for k, v in params.items():
-        base_v = getattr(BaseTrader, k)
-        marker = ' <--' if v != base_v else ''
-        print(f"    {k:<40} = {v}{marker}")
+        bv = base_params.get(k)
+        marker = ' <--' if v != bv else ''
+        print(f"    {k:<35} = {v}{marker}")
 
-# ── Validate best on day 0 ─────────────────────────────────────────────────────
+# ── Validate best on R4 day 3 ──────────────────────────────────────────────────
 print(f"\n{'='*70}")
-print("OVERFITTING CHECK: best params on held-out day 0")
+print("OVERFITTING CHECK: best params on held-out R4 day 3")
 print(f"{'='*70}")
 best_pnl, best_params = results[0]
-val_pnl = eval_trader(make_trader(best_params), VAL_DAYS)
-print(f"  Best train PnL (days 1+2): {best_pnl:,.0f}")
-print(f"  Val PnL        (day 0):    {val_pnl:,.0f}")
-print(f"  Baseline val   (day 0):    {baseline_val:,.0f}")
+best_trader_cls = make_trader(best_params)
+val_pnl = eval_trader(best_trader_cls, VAL_DAYS)
+print(f"  Best train PnL (R3 days 0+1+2): {best_pnl:,.0f}")
+print(f"  Val PnL        (R4 day 3):       {val_pnl:,.0f}")
+print(f"  Baseline val   (R4 day 3):       {baseline_val:,.0f}")
 delta = val_pnl - baseline_val
-print(f"  Delta vs baseline val:     {delta:+,.0f}  ({'OK' if delta > -baseline_val*0.1 else 'OVERFIT WARNING'})")
+print(f"  Delta vs baseline val:           {delta:+,.0f}  "
+      f"({'OK' if delta > -abs(baseline_val) * 0.1 else 'OVERFIT WARNING'})")
 
-# ── Print best params as ready-to-paste code ─────────────────────────────────
+# ── Print best params as ready-to-paste code ──────────────────────────────────
 print(f"\n{'='*70}")
 print("BEST PARAMS (copy into Trader class):")
 print(f"{'='*70}")
 _, best_params = results[0]
-for k, v in best_params.items():
-    base_v = getattr(BaseTrader, k)
-    if v != base_v:
-        print(f"    {k} = {v}")
+for k in SPACE:
+    print(f"    {k:<20} = {best_params[k]}")
