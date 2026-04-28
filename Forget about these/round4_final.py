@@ -130,37 +130,55 @@ class Trader:
     HYDROGEL = True
     VELVETFRUIT = True
     OPTIONS = True
+    FREE_OTM = True   # VEV_6000/6500: compete with Mark 01 for Mark 22's price-0 dumps
 
     # ──────────────────────────────────────────────────────────────────────────
-    # HYDROGEL_PACK - Mean Reversion Strategy
+    # FREE_OTM strategy — Mark 22 dumps OTM strikes onto Mark 01's resting bid.
+    # We race Mark 01 at the prevailing bid level, capped by `bid_cap` so we
+    # only compete when the price is cheap enough to give positive expected MTM.
     # ──────────────────────────────────────────────────────────────────────────
-    HYDROGEL_FAIR_VALUE = 9993.73
-    HYDROGEL_MISPRICE_THRESHOLD = 4       # halved: fire on smaller misprices
+    # symbol → (bid_cap, ask_floor)
+    #   bid_cap   = max we'll pay; we bid at min(best_bid, bid_cap)
+    #   ask_floor = our resting offer price (catches any taker bidding ≥ this)
+    FREE_OTM_PARAMS = {
+        "VEV_6500": (0,  2),   # always price 0; pure free lottery tickets
+        "VEV_6000": (0,  2),   # always price 0
+        "VEV_5500": (3,  6),   # Mark 22 dumps at 0–9; we lift up to 3
+        "VEV_5400": (8, 14),   # Mark 22 dumps at 3–21; we lift up to 8
+    }
+    FREE_OTM_STRIKES = tuple(FREE_OTM_PARAMS.keys())
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # HYDROGEL_PACK - Mean Reversion Strategy (Not optimized - 0,2,7,8,9)
+    # ──────────────────────────────────────────────────────────────────────────
+    HYDROGEL_FAIR_VALUE = 10012                                              
+    HYDROGEL_MISPRICE_THRESHOLD = 7       # halved: fire on smaller misprices
     HYDROGEL_CLIP_RANGE = 100
-    HYDROGEL_SPREAD_OFFSET = 1
-    HYDROGEL_DEVIATION_SCALE = 0.69
-    HYDROGEL_POSITION_SCALE = 4           # reduced: less skew → quotes stay tight → more fills
-    HYDROGEL_TARGET_SCALE = 4             # doubled: larger targets → more position cycling
+    HYDROGEL_SPREAD_OFFSET = 3
+    HYDROGEL_DEVIATION_SCALE = 0.213
+    HYDROGEL_POSITION_SCALE = 1.958           # reduced: less skew → quotes stay tight → more fills
+    HYDROGEL_TARGET_SCALE = 7             # doubled: larger targets → more position cycling
     HYDROGEL_AGGRESSIVE_THRESHOLD = 40
     HYDROGEL_AGGRESSIVE_SIZE = 40
     HYDROGEL_WARMUP_TICKS = 4490        # faster ramp: start trading at full scale sooner
+    HYD_BASE_VOL = 3.0; HYD_VOL_WINDOW = 23; HYD_VOL_MIN_RATIO = 0.876; HYD_VOL_MAX_RATIO = 2.592
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VELVETFRUIT_EXTRACT - Mean Reversion Strategy
+    # VELVETFRUIT_EXTRACT - Mean Reversion Strategy (Not optimized - 0,2,7,8,9)
     # ──────────────────────────────────────────────────────────────────────────
-    VEV_FAIR_VALUE = 5247.36
-    VEV_MISPRICE_THRESHOLD = 5            # halved
+    VEV_FAIR_VALUE = 5246.5
+    VEV_MISPRICE_THRESHOLD = 9          
     VEV_CLIP_RANGE = 60
-    VEV_SPREAD_OFFSET = 1
-    VEV_DEVIATION_SCALE = 0.61
-    VEV_POSITION_SCALE = 1                # reduced: less inventory skew → more fills
-    VEV_TARGET_SCALE = 11                  # doubled
+    VEV_SPREAD_OFFSET = 3
+    VEV_DEVIATION_SCALE = 0.178
+    VEV_POSITION_SCALE = 2.183             
+    VEV_TARGET_SCALE = 6                 
     VEV_AGGRESSIVE_THRESHOLD = 30
     VEV_AGGRESSIVE_SIZE = 40
-    VEV_WARMUP_TICKS = 772             # warmup matching HYDROGEL
+    VEV_WARMUP_TICKS = 772
 
     # 4-day means (R3d0, R4d1, R4d2, R4d3). (fair_value, threshold, clip, agg_thresh)
-    _OPT_PARAMS = {
+    OPT_MR_STRIKES = {
         4000: (1247.37,  5, 60, 25),
         4500: ( 747.37,  4, 60, 20),
         5000: ( 251.67,  1, 40, 15),
@@ -170,14 +188,26 @@ class Trader:
         5400: (  14.09,  1, 15,  5),
         5500: (   5.55,  1,  6,  3),
     }
-    OPT_MR_STRIKES = _OPT_PARAMS
 
-    OPT_TARGET_SCALE    = 11              # increased: larger targets → more capacity
-    OPT_SPREAD_OFFSET   = 1
-    OPT_DEVIATION_SCALE = 23    # relative: applied to deviation/fv so skew is proportional across strikes
-    OPT_POSITION_SCALE  = 2              # reduced: less skew → more passive fills
-    OPT_AGGRESSIVE_SIZE = 5              # enabled: fade large moves aggressively
-    OPT_WARMUP_TICKS    = 2510          # faster ramp matching HYDROGEL_WARMUP_TICKS
+    TIME_TO_EXPIRY = 6
+    _current_tte: int = None   # set on first tick
+    _opt_fvs: dict = None      # set on first tick, recomputed at end of each day
+    _OPT_THETA_C = {
+        5100: 86.0532,
+        5200: 49.1043,
+        5300: 23.9030,
+        5400:  8.1263,
+        5500:  3.3581,
+    }
+
+    OPT_TARGET_SCALE    = 12
+    OPT_SPREAD_OFFSET   = 5
+    OPT_AGGRESSIVE_SIZE = 6
+    OPT_DEVIATION_SCALE = 14
+    OPT_POSITION_SCALE  = 2.263
+    OPT_WARMUP_TICKS    = 2510
+
+    VEV_BASE_VOL = 1.7; VEV_VOL_WINDOW = 31; VEV_VOL_MIN_RATIO = 0.778; VEV_VOL_MAX_RATIO = 1.259
 
     POSITION_LIMITS: Dict[str, int] = {
         "HYDROGEL_PACK":        200,
@@ -202,13 +232,20 @@ class Trader:
             except Exception:
                 trader_data = {}
 
-        # ── Day tracking (timestamp resets to 0 each new day) ─────────────────
-        last_ts   = trader_data.get("last_ts", -1)
-        day_index = trader_data.get("day_index", 0)
-        if last_ts > 0 and state.timestamp < last_ts - 500_000:
-            day_index += 1
-        trader_data["last_ts"]   = state.timestamp
-        trader_data["day_index"] = day_index
+        # ── OTM option FVs: instance vars persist across ticks without traderData ──
+        if self._current_tte is None:
+            self._current_tte = self.TIME_TO_EXPIRY
+            self._opt_fvs = {K: C * log(self._current_tte) for K, C in self._OPT_THETA_C.items()}
+            # DEBUG: remove before final submission
+            logger.print(f"[THETA] init TTE={self._current_tte} fvs={ {k: round(v,2) for k,v in self._opt_fvs.items()} }")
+
+        if state.timestamp == 999900:
+            self._current_tte = max(1, self._current_tte - 1)
+            self._opt_fvs = {K: C * log(self._current_tte) for K, C in self._OPT_THETA_C.items()}
+            # DEBUG: remove before final submission
+            logger.print(f"[THETA] end-of-day → TTE={self._current_tte} fvs={ {k: round(v,2) for k,v in self._opt_fvs.items()} }")
+
+        opt_fvs: dict = self._opt_fvs
 
         # ── Spot price ─────────────────────────────────────────────────────────
         vev_od = state.order_depths.get("VELVETFRUIT_EXTRACT")
@@ -217,6 +254,37 @@ class Trader:
         else:
             spot = self.VEV_FAIR_VALUE
 
+        # ── Rolling vol for VELVETFRUIT ─────────────────────────────────────────
+        vev_hist: list = trader_data.get("vev_hist", [])
+        vev_hist.append(spot)
+        if len(vev_hist) > self.VEV_VOL_WINDOW:
+            vev_hist = vev_hist[-self.VEV_VOL_WINDOW:]
+        trader_data["vev_hist"] = vev_hist
+        if len(vev_hist) >= 2:
+            mean = sum(vev_hist) / len(vev_hist)
+            vol  = (sum((x - mean) ** 2 for x in vev_hist) / len(vev_hist)) ** 0.5
+        else:
+            vol = self.VEV_BASE_VOL
+        vol_ratio = max(self.VEV_VOL_MIN_RATIO, min(self.VEV_VOL_MAX_RATIO, vol / self.VEV_BASE_VOL))
+
+        # ── Rolling vol for HYDROGEL ────────────────────────────────────────────
+        hyd_od = state.order_depths.get("HYDROGEL_PACK")
+        if hyd_od and hyd_od.buy_orders and hyd_od.sell_orders:
+            hyd_mid = (max(hyd_od.buy_orders) + min(hyd_od.sell_orders)) / 2
+        else:
+            hyd_mid = self.HYDROGEL_FAIR_VALUE
+        hyd_hist: list = trader_data.get("hyd_hist", [])
+        hyd_hist.append(hyd_mid)
+        if len(hyd_hist) > self.HYD_VOL_WINDOW:
+            hyd_hist = hyd_hist[-self.HYD_VOL_WINDOW:]
+        trader_data["hyd_hist"] = hyd_hist
+        if len(hyd_hist) >= 2:
+            hyd_mean = sum(hyd_hist) / len(hyd_hist)
+            hyd_vol  = (sum((x - hyd_mean) ** 2 for x in hyd_hist) / len(hyd_hist)) ** 0.5
+        else:
+            hyd_vol = self.HYD_BASE_VOL
+        hyd_vol_ratio = max(self.HYD_VOL_MIN_RATIO, min(self.HYD_VOL_MAX_RATIO, hyd_vol / self.HYD_BASE_VOL))
+
         result: Dict[str, List[Order]] = {}
 
         for product, od in state.order_depths.items():
@@ -224,11 +292,15 @@ class Trader:
             limit = self.POSITION_LIMITS.get(product, 50)
 
             if product == "HYDROGEL_PACK":
-                result[product] = self._trade_hydrogel(od, pos, limit, state.timestamp)
+                result[product] = self._trade_hydrogel(od, pos, limit, state.timestamp, hyd_vol_ratio)
             elif product == "VELVETFRUIT_EXTRACT":
-                result[product] = self._trade_velvetfruit(od, pos, limit, state.timestamp)
+                result[product] = self._trade_velvetfruit(od, pos, limit, state.timestamp, vol_ratio)
+            elif product in self.FREE_OTM_STRIKES:
+                result[product] = self._trade_free_otm(product, od, pos, limit)
             elif product.startswith("VEV_"):
-                result[product] = self._trade_vev_option(product, od, pos, limit, spot, state.timestamp)
+                K = int(product.split("_")[1])
+                fv_override = opt_fvs.get(K)  # None for ATM/ITM strikes
+                result[product] = self._trade_vev_option(product, od, pos, limit, spot, state.timestamp, fv_override, vol_ratio)
             else:
                 result[product] = []
 
@@ -239,7 +311,7 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # HYDROGEL_PACK
     # ──────────────────────────────────────────────────────────────────────────
-    def _trade_hydrogel(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0) -> List[Order]:
+    def _trade_hydrogel(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0, vol_ratio: float = 1.0) -> List[Order]:
         if not self.HYDROGEL: return []
 
         orders: List[Order] = []
@@ -250,7 +322,8 @@ class Trader:
         deviation = mid - self.HYDROGEL_FAIR_VALUE
 
         ramp = min(1.0, timestamp / self.HYDROGEL_WARMUP_TICKS) if self.HYDROGEL_WARMUP_TICKS > 0 else 1.0
-        effective_target_scale = self.HYDROGEL_TARGET_SCALE * ramp
+        effective_target_scale  = self.HYDROGEL_TARGET_SCALE * ramp * vol_ratio
+        effective_spread_offset = max(1, round(self.HYDROGEL_SPREAD_OFFSET * vol_ratio))
 
         target = int(max(-limit, min(limit, -deviation * effective_target_scale)))
         buy_capacity  = min(max(0, target - pos), limit - pos)
@@ -277,8 +350,8 @@ class Trader:
         pos_skew = pos / limit if limit != 0 else 0
         skew = int(round(deviation * self.HYDROGEL_DEVIATION_SCALE + pos_skew * self.HYDROGEL_POSITION_SCALE))
 
-        our_bid = int(best_bid + self.HYDROGEL_SPREAD_OFFSET - skew)
-        our_ask = int(best_ask - self.HYDROGEL_SPREAD_OFFSET - skew)
+        our_bid = int(best_bid + effective_spread_offset - skew)
+        our_ask = int(best_ask - effective_spread_offset - skew)
 
         if our_bid >= our_ask:
             our_bid = int(self.HYDROGEL_FAIR_VALUE - 2)
@@ -321,7 +394,7 @@ class Trader:
     # ──────────────────────────────────────────────────────────────────────────
     # VELVETFRUIT_EXTRACT
     # ──────────────────────────────────────────────────────────────────────────
-    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0) -> List[Order]:
+    def _trade_velvetfruit(self, od: OrderDepth, pos: int, limit: int, timestamp: int = 0, vol_ratio: float = 1.0) -> List[Order]:
         if not self.VELVETFRUIT: return []
 
         orders: List[Order] = []
@@ -332,7 +405,8 @@ class Trader:
         deviation = mid - self.VEV_FAIR_VALUE
 
         ramp = min(1.0, timestamp / self.VEV_WARMUP_TICKS) if self.VEV_WARMUP_TICKS > 0 else 1.0
-        effective_target_scale = self.VEV_TARGET_SCALE * ramp
+        effective_target_scale = self.VEV_TARGET_SCALE * ramp * vol_ratio
+        effective_spread_offset = max(1, round(self.VEV_SPREAD_OFFSET * vol_ratio))
         target = int(max(-limit, min(limit, -deviation * effective_target_scale)))
         buy_capacity  = min(max(0, target - pos), limit - pos)
         sell_capacity = min(max(0, pos - target), limit + pos)
@@ -358,8 +432,8 @@ class Trader:
         pos_skew = pos / limit if limit != 0 else 0
         skew = int(round(deviation * self.VEV_DEVIATION_SCALE + pos_skew * self.VEV_POSITION_SCALE))
 
-        our_bid = int(best_bid + self.VEV_SPREAD_OFFSET - skew)
-        our_ask = int(best_ask - self.VEV_SPREAD_OFFSET - skew)
+        our_bid = int(best_bid + effective_spread_offset - skew)
+        our_ask = int(best_ask - effective_spread_offset - skew)
 
         if our_bid >= our_ask:
             our_bid = int(self.VEV_FAIR_VALUE - 2)
@@ -400,10 +474,66 @@ class Trader:
         return orders
 
     # ──────────────────────────────────────────────────────────────────────────
+    # FREE_OTM — VEV_6000 / VEV_6500 (deep OTM, Mark 22 dumps at 0 every time)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _trade_free_otm(self, symbol: str, od: OrderDepth, pos: int, limit: int) -> List[Order]:
+        if not self.FREE_OTM:
+            return []
+        params = self.FREE_OTM_PARAMS.get(symbol)
+        if params is None:
+            return []
+        bid_cap, ask_floor = params
+
+        orders: List[Order] = []
+        buy_capacity  = max(0, limit - pos)
+        sell_capacity = max(0, limit + pos)
+
+        # Lift any ask at or below our cap (bypasses normal threshold logic)
+        if od.sell_orders and buy_capacity > 0:
+            for ask_price in sorted(od.sell_orders.keys()):
+                if ask_price > bid_cap:
+                    break
+                qty = min(-od.sell_orders[ask_price], buy_capacity)
+                if qty > 0:
+                    orders.append(Order(symbol, int(ask_price), qty))
+                    buy_capacity -= qty
+
+        # Hit any bid at or above our ask floor — instant profit
+        if od.buy_orders and sell_capacity > 0:
+            for bid_price in sorted(od.buy_orders.keys(), reverse=True):
+                if bid_price < ask_floor:
+                    break
+                qty = min(od.buy_orders[bid_price], sell_capacity)
+                if qty > 0:
+                    orders.append(Order(symbol, int(bid_price), -qty))
+                    sell_capacity -= qty
+
+        # Resting bid: race Mark 01 at the prevailing bid level, capped at bid_cap.
+        # When best_bid > bid_cap, our_bid stays at bid_cap (below market) → won't fill.
+        if buy_capacity > 0:
+            if od.buy_orders:
+                best_bid = max(od.buy_orders.keys())
+                our_bid_price = min(int(best_bid), bid_cap)
+            else:
+                our_bid_price = bid_cap
+            orders.append(Order(symbol, max(0, our_bid_price), buy_capacity))
+
+        # Resting ask at max(ask_floor, best_ask) — never undercut Mark 14's offer.
+        if sell_capacity > 0:
+            our_ask_price = ask_floor
+            if od.sell_orders:
+                best_ask = min(od.sell_orders.keys())
+                our_ask_price = max(ask_floor, int(best_ask))
+            orders.append(Order(symbol, our_ask_price, -sell_capacity))
+
+        return orders
+
+    # ──────────────────────────────────────────────────────────────────────────
     # VEV_XXXX Options
     # ──────────────────────────────────────────────────────────────────────────
     def _trade_vev_option(self, symbol: str, od: OrderDepth, pos: int,
-                          limit: int, spot: float, timestamp: int = 0) -> List[Order]:
+                          limit: int, spot: float, timestamp: int = 0,
+                          fv_override: float = None, vol_ratio: float = 1.0) -> List[Order]:
         if not self.OPTIONS:
             return []
 
@@ -412,6 +542,8 @@ class Trader:
             return []
 
         fv, threshold, clip, agg_thresh = self.OPT_MR_STRIKES[K]
+        if fv_override is not None:
+            fv = max(1.0, fv_override)  # clamp to 1 to avoid log(<=0) on expiry
         orders: List[Order] = []
 
         best_bid = max(od.buy_orders.keys())  if od.buy_orders  else fv - clip
@@ -420,7 +552,8 @@ class Trader:
         deviation = mid - fv
 
         ramp = min(1.0, timestamp / self.OPT_WARMUP_TICKS) if self.OPT_WARMUP_TICKS > 0 else 1.0
-        effective_target_scale = self.OPT_TARGET_SCALE * ramp
+        effective_target_scale  = self.OPT_TARGET_SCALE * ramp * vol_ratio
+        effective_spread_offset = max(1, round(self.OPT_SPREAD_OFFSET * vol_ratio))
         target        = int(max(-limit, min(limit, -deviation * effective_target_scale)))
         buy_capacity  = min(max(0, target - pos), limit - pos)
         sell_capacity = min(max(0, pos - target), limit + pos)
@@ -446,8 +579,8 @@ class Trader:
         pos_skew = pos / limit if limit != 0 else 0
         skew = int(round((deviation / fv) * self.OPT_DEVIATION_SCALE + pos_skew * self.OPT_POSITION_SCALE))
 
-        our_bid = int(best_bid + self.OPT_SPREAD_OFFSET - skew)
-        our_ask = int(best_ask - self.OPT_SPREAD_OFFSET - skew)
+        our_bid = int(best_bid + effective_spread_offset - skew)
+        our_ask = int(best_ask - effective_spread_offset - skew)
 
         if our_bid >= our_ask:
             our_bid = int(fv - 2)

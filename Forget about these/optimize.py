@@ -1,10 +1,9 @@
 """
-Random search optimizer for round4_EMA.py.
-Trains on ROUND_3 days 0, 1, 2.  Day 3 in ROUND_4 held out for validation.
+Random search optimizer for round4_ema.py — EMA-blended FV hyperparameters.
+Baseline = all EMA weights = 0 (anchored to static FVs).
 
 Run with:
     .venv/bin/python -u optimize.py
-The -u flag disables output buffering so you see progress in real time.
 """
 import sys, random, time
 sys.stdout.reconfigure(line_buffering=True)
@@ -28,9 +27,8 @@ class RoundFileReader(FileReader):
         self._base = base
 
     def file(self, path_parts):
-        # path_parts = ['round3', 'prices_round_3_day_0.csv']
-        round_folder = path_parts[0]          # 'round3' or 'round4'
-        n = round_folder[5:]                  # '3' or '4'
+        round_folder = path_parts[0]
+        n = round_folder[5:]
         fname = path_parts[-1]
         p = self._base / f"ROUND_{n}" / fname
         if not p.is_file():
@@ -38,7 +36,7 @@ class RoundFileReader(FileReader):
         return _cm(p)
 
 # ── Load base trader ───────────────────────────────────────────────────────────
-spec = importlib.util.spec_from_file_location('trader_mod', 'round4_22.py')
+spec = importlib.util.spec_from_file_location('trader_mod', 'round4_ema.py')
 BASE_MOD = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(BASE_MOD)
 BaseTrader = BASE_MOD.Trader
@@ -47,8 +45,8 @@ BASE_DIR = Path('.')
 FR  = RoundFileReader(BASE_DIR)
 TMM = TradeMatchingMode.all
 
-TRAIN_DAYS = [(3, 0), (3, 1), (3, 2)]   # (round, day)
-VAL_DAYS   = [(4, 3)]
+TRAIN_DAYS = [(3, 1), (3, 2), (4, 3)]
+VAL_DAYS   = [(3, 0)]
 
 # ── PnL extraction ─────────────────────────────────────────────────────────────
 def get_pnl(result):
@@ -59,6 +57,7 @@ def get_pnl(result):
     return sum(final.values())
 
 def eval_trader(trader_cls, days):
+    # Fresh instance per day: no inter-day instance-var bleed (theta TTE, etc.)
     total = 0
     for round_num, day_num in days:
         trader = trader_cls()
@@ -67,42 +66,56 @@ def eval_trader(trader_cls, days):
     return total
 
 # ── Parameter search space ─────────────────────────────────────────────────────
-# (lo, hi, type)  type: 'float' | 'int'
+# ALPHA: EMA decay rate.  alpha=0 → no update (effectively disabled).
+#   alpha=0.0001 ≈ 10k-tick window;  0.0005 ≈ 2k-tick window;  0.00001 ≈ 100k-tick.
+# WEIGHT: blend factor.  0 = anchor 100% to static FV;  0.5 = half-weight EMA.
 SPACE = {
-    # HYDROGEL vol-adaptive sizing
-    'HYD_VOL_WINDOW':    (5,    50,   'int'),
-    'HYD_VOL_MIN_RATIO': (0.20, 0.90, 'float'),
-    'HYD_VOL_MAX_RATIO': (1.20, 4.00, 'float'),
-    # VELVETFRUIT vol-adaptive sizing
-    'VEV_VOL_WINDOW':    (5,    50,   'int'),
-    'VEV_VOL_MIN_RATIO': (0.20, 0.90, 'float'),
-    'VEV_VOL_MAX_RATIO': (1.20, 4.00, 'float'),
+    # HYDROGEL EMA
+    'HYD_EMA_ALPHA':   (0.0, 0.00005, 'float'),
+    'HYD_EMA_WEIGHT':  (0.0, 0.50,   'float'),
+    # VELVETFRUIT EMA
+    'VEV_EMA_ALPHA':   (0.0, 0.00005, 'float'),
+    'VEV_EMA_WEIGHT':  (0.0, 0.50,   'float'),
+    # OPTIONS EMA
+    'OPT_EMA_ALPHA':   (0.0, 0.00005, 'float'),
+    'OPT_EMA_WEIGHT':  (0.0, 0.50,   'float'),
 }
 
 def sample():
     p = {}
     for k, (lo, hi, t) in SPACE.items():
-        p[k] = random.randint(lo, hi) if t == 'int' else round(random.uniform(lo, hi), 3)
+        if t == 'int':
+            p[k] = random.randint(lo, hi)
+        else:
+            # extra precision for very small alphas
+            p[k] = round(random.uniform(lo, hi), 6)
     return p
 
 def make_trader(params):
-    attrs = {k: params[k] for k in SPACE}
+    attrs = {k: params[k] for k in SPACE if k in params}
     return type('T', (BaseTrader,), attrs)
+
+# Baseline: force all EMA weights to 0 (anchored to static FVs only)
+BaselineTrader = type('Baseline', (BaseTrader,), {
+    'HYD_EMA_WEIGHT': 0.0,
+    'VEV_EMA_WEIGHT': 0.0,
+    'OPT_EMA_WEIGHT': 0.0,
+})
 
 # ── Baseline ───────────────────────────────────────────────────────────────────
 print("Computing baseline (current params)...", flush=True)
 for round_num, day_num in TRAIN_DAYS:
     print(f"  Running round {round_num} day {day_num}...", flush=True)
-baseline_train = eval_trader(BaseTrader, TRAIN_DAYS)
+baseline_train = eval_trader(BaselineTrader, TRAIN_DAYS)
 print(f"  Running round 4 day 3 (val)...", flush=True)
-baseline_val   = eval_trader(BaseTrader, VAL_DAYS)
+baseline_val   = eval_trader(BaselineTrader, VAL_DAYS)
 print(f"  Train (R3 days 0+1+2): {baseline_train:,.0f}")
 print(f"  Val   (R4 day 3):      {baseline_val:,.0f}")
 print()
 
 # ── Random search ──────────────────────────────────────────────────────────────
 N = 300
-results = []  # [(train_pnl, params)]
+results = []
 
 print(f"Running {N} random trials on R3 days 0+1+2  (one dot = 1 trial)...")
 print(f"  Legend:  . = trial done  | = checkpoint every 10  * = new best")
@@ -144,7 +157,8 @@ print(f"\n{'='*70}")
 print(f"TOP {TOP_K} RESULTS (train = R3 days 0+1+2)")
 print(f"{'='*70}")
 
-base_params = {k: getattr(BaseTrader, k, None) for k in SPACE}
+# Safe baseline comparison (only for params that exist on BaseTrader)
+base_params = {k: getattr(BaseTrader, k, None) for k in SPACE.keys()}
 
 for rank, (pnl, params) in enumerate(results[:TOP_K], 1):
     print(f"\n#{rank}  Train PnL: {pnl:,.0f}  (baseline: {baseline_train:,.0f})")
@@ -173,4 +187,4 @@ print("BEST PARAMS (copy into Trader class):")
 print(f"{'='*70}")
 _, best_params = results[0]
 for k in SPACE:
-    print(f"    {k:<20} = {best_params[k]}")
+    print(f"    {k:<35} = {best_params[k]}")
