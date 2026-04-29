@@ -36,7 +36,7 @@ class RoundFileReader(FileReader):
         return _cm(p)
 
 # ── Load base trader ───────────────────────────────────────────────────────────
-spec = importlib.util.spec_from_file_location('trader_mod', 'round4_ema.py')
+spec = importlib.util.spec_from_file_location('trader_mod', 'round5_MM.py')
 BASE_MOD = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(BASE_MOD)
 BaseTrader = BASE_MOD.Trader
@@ -45,8 +45,8 @@ BASE_DIR = Path('.')
 FR  = RoundFileReader(BASE_DIR)
 TMM = TradeMatchingMode.all
 
-TRAIN_DAYS = [(3, 1), (3, 2), (4, 3)]
-VAL_DAYS   = [(3, 0)]
+TRAIN_DAYS = [(5, 3), (5, 4)]
+VAL_DAYS   = [(5, 2)]
 
 # ── PnL extraction ─────────────────────────────────────────────────────────────
 def get_pnl(result):
@@ -65,20 +65,11 @@ def eval_trader(trader_cls, days):
         total += get_pnl(result)
     return total
 
-# ── Parameter search space ─────────────────────────────────────────────────────
-# ALPHA: EMA decay rate.  alpha=0 → no update (effectively disabled).
-#   alpha=0.0001 ≈ 10k-tick window;  0.0005 ≈ 2k-tick window;  0.00001 ≈ 100k-tick.
-# WEIGHT: blend factor.  0 = anchor 100% to static FV;  0.5 = half-weight EMA.
 SPACE = {
-    # HYDROGEL EMA
-    'HYD_EMA_ALPHA':   (0.0, 0.00005, 'float'),
-    'HYD_EMA_WEIGHT':  (0.0, 0.50,   'float'),
-    # VELVETFRUIT EMA
-    'VEV_EMA_ALPHA':   (0.0, 0.00005, 'float'),
-    'VEV_EMA_WEIGHT':  (0.0, 0.50,   'float'),
-    # OPTIONS EMA
-    'OPT_EMA_ALPHA':   (0.0, 0.00005, 'float'),
-    'OPT_EMA_WEIGHT':  (0.0, 0.50,   'float'),
+    # ── global regime control ONLY ──
+    'VOL_THRESHOLD_SCALE': (0.7, 1.5, 'float'),
+    'TREND_HOLD_SCALE': (0.7, 1.3, 'float'),
+    'IMBALANCE_WEIGHT': (0.0, 0.6, 'float'),
 }
 
 def sample():
@@ -95,11 +86,190 @@ def make_trader(params):
     attrs = {k: params[k] for k in SPACE if k in params}
     return type('T', (BaseTrader,), attrs)
 
-# Baseline: force all EMA weights to 0 (anchored to static FVs only)
+# Baseline: current Round 5 strategy configuration (ENABLED + per-product params)
 BaselineTrader = type('Baseline', (BaseTrader,), {
-    'HYD_EMA_WEIGHT': 0.0,
-    'VEV_EMA_WEIGHT': 0.0,
-    'OPT_EMA_WEIGHT': 0.0,
+
+    # ── product enablement ─────────────────────────────────────
+    'ENABLED': {
+        # Galaxy Sounds
+        'GALAXY_SOUNDS_BLACK_HOLES': True,
+        'GALAXY_SOUNDS_DARK_MATTER': True,
+        'GALAXY_SOUNDS_PLANETARY_RINGS': True,
+        'GALAXY_SOUNDS_SOLAR_FLAMES': True,
+        'GALAXY_SOUNDS_SOLAR_WINDS': True,
+
+        # Microchip
+        'MICROCHIP_CIRCLE': True,
+        'MICROCHIP_OVAL': True,
+        'MICROCHIP_RECTANGLE': True,
+        'MICROCHIP_SQUARE': True,
+        'MICROCHIP_TRIANGLE': True,
+
+        # Oxygen Shake
+        'OXYGEN_SHAKE_CHOCOLATE': True,
+        'OXYGEN_SHAKE_EVENING_BREATH': True,
+        'OXYGEN_SHAKE_GARLIC': True,
+        'OXYGEN_SHAKE_MINT': True,
+        'OXYGEN_SHAKE_MORNING_BREATH': True,
+
+        # Panel
+        'PANEL_1X2': True,
+        'PANEL_1X4': True,
+        'PANEL_2X2': True,
+        'PANEL_2X4': True,
+        'PANEL_4X4': True,
+
+        # Pebbles
+        'PEBBLES_XS': True,
+        'PEBBLES_S': True,
+        'PEBBLES_M': True,
+        'PEBBLES_L': True,
+        'PEBBLES_XL': True,
+
+        # Robot
+        'ROBOT_DISHES': True,
+        'ROBOT_IRONING': True,
+        'ROBOT_LAUNDRY': True,
+        'ROBOT_MOPPING': True,
+        'ROBOT_VACUUMING': True,
+
+        # Sleep Pod
+        'SLEEP_POD_COTTON': True,
+        'SLEEP_POD_LAMB_WOOL': True,
+        'SLEEP_POD_NYLON': True,
+        'SLEEP_POD_POLYESTER': True,
+        'SLEEP_POD_SUEDE': True,
+
+        # Snackpack
+        'SNACKPACK_CHOCOLATE': True,
+        'SNACKPACK_PISTACHIO': True,
+        'SNACKPACK_RASPBERRY': True,
+        'SNACKPACK_STRAWBERRY': True,
+        'SNACKPACK_VANILLA': True,
+
+        # Translator
+        'TRANSLATOR_ASTRO_BLACK': True,
+        'TRANSLATOR_ECLIPSE_CHARCOAL': True,
+        'TRANSLATOR_GRAPHITE_MIST': True,
+        'TRANSLATOR_SPACE_GRAY': True,
+        'TRANSLATOR_VOID_BLUE': True,
+
+        # UV Visor
+        'UV_VISOR_AMBER': True,
+        'UV_VISOR_MAGENTA': True,
+        'UV_VISOR_ORANGE': True,
+        'UV_VISOR_RED': True,
+        'UV_VISOR_YELLOW': True,
+    },
+
+    # ── per-product regime tuning (VOL_THRESHOLD) ───────────────
+    'VOL_THRESHOLD': {
+        'GALAXY_SOUNDS_BLACK_HOLES': 1.2,
+        'GALAXY_SOUNDS_DARK_MATTER': 2.0,
+        'GALAXY_SOUNDS_PLANETARY_RINGS': 1.2,
+        'GALAXY_SOUNDS_SOLAR_FLAMES': 2.0,
+        'GALAXY_SOUNDS_SOLAR_WINDS': 2.0,
+
+        'MICROCHIP_CIRCLE': 2.0,
+        'MICROCHIP_OVAL': 1.3,
+        'MICROCHIP_RECTANGLE': 2.0,
+        'MICROCHIP_SQUARE': 1.3,
+        'MICROCHIP_TRIANGLE': 1.3,
+
+        'OXYGEN_SHAKE_CHOCOLATE': 3.0,
+        'OXYGEN_SHAKE_EVENING_BREATH': 3.5,
+        'OXYGEN_SHAKE_GARLIC': 1.3,
+        'OXYGEN_SHAKE_MINT': 2.0,
+        'OXYGEN_SHAKE_MORNING_BREATH': 2.0,
+
+        'PANEL_1X2': 2.0,
+        'PANEL_1X4': 2.0,
+        'PANEL_2X2': 2.0,
+        'PANEL_2X4': 2.0,
+        'PANEL_4X4': 2.0,
+
+        'PEBBLES_L': 2.5,
+        'PEBBLES_M': 2.5,
+        'PEBBLES_S': 2.5,
+        'PEBBLES_XL': 2.5,
+        'PEBBLES_XS': 2.5,
+
+        'ROBOT_DISHES': 4.0,
+        'ROBOT_IRONING': 4.0,
+        'ROBOT_LAUNDRY': 3.0,
+        'ROBOT_MOPPING': 3.0,
+        'ROBOT_VACUUMING': 3.0,
+
+        'SLEEP_POD_COTTON': 1.4,
+        'SLEEP_POD_LAMB_WOOL': 2.0,
+        'SLEEP_POD_NYLON': 2.0,
+        'SLEEP_POD_POLYESTER': 1.4,
+        'SLEEP_POD_SUEDE': 1.4,
+
+        'SNACKPACK_CHOCOLATE': 3.0,
+        'SNACKPACK_PISTACHIO': 2.5,
+        'SNACKPACK_RASPBERRY': 2.5,
+        'SNACKPACK_STRAWBERRY': 2.5,
+        'SNACKPACK_VANILLA': 2.5,
+
+        'TRANSLATOR_ASTRO_BLACK': 2.0,
+        'TRANSLATOR_ECLIPSE_CHARCOAL': 2.0,
+        'TRANSLATOR_GRAPHITE_MIST': 2.0,
+        'TRANSLATOR_SPACE_GRAY': 2.0,
+        'TRANSLATOR_VOID_BLUE': 2.0,
+
+        'UV_VISOR_AMBER': 1.2,
+        'UV_VISOR_MAGENTA': 2.0,
+        'UV_VISOR_ORANGE': 2.0,
+        'UV_VISOR_RED': 2.0,
+        'UV_VISOR_YELLOW': 2.0,
+    },
+
+    # ── per-product trend hold ──────────────────────────────────
+    'TREND_HOLD_INIT': {
+        'GALAXY_SOUNDS_BLACK_HOLES': 10,
+        'GALAXY_SOUNDS_DARK_MATTER': 8,
+        'GALAXY_SOUNDS_PLANETARY_RINGS': 10,
+        'GALAXY_SOUNDS_SOLAR_FLAMES': 8,
+        'GALAXY_SOUNDS_SOLAR_WINDS': 8,
+
+        'MICROCHIP_CIRCLE': 8,
+        'MICROCHIP_OVAL': 10,
+        'MICROCHIP_RECTANGLE': 8,
+        'MICROCHIP_SQUARE': 10,
+        'MICROCHIP_TRIANGLE': 10,
+
+        'OXYGEN_SHAKE_CHOCOLATE': 6,
+        'OXYGEN_SHAKE_EVENING_BREATH': 6,
+        'OXYGEN_SHAKE_GARLIC': 10,
+        'OXYGEN_SHAKE_MINT': 8,
+        'OXYGEN_SHAKE_MORNING_BREATH': 8,
+
+        'ROBOT_DISHES': 5,
+        'ROBOT_IRONING': 5,
+        'ROBOT_LAUNDRY': 7,
+        'ROBOT_MOPPING': 7,
+        'ROBOT_VACUUMING': 7,
+
+        'SLEEP_POD_COTTON': 10,
+        'SLEEP_POD_LAMB_WOOL': 8,
+        'SLEEP_POD_NYLON': 8,
+        'SLEEP_POD_POLYESTER': 10,
+        'SLEEP_POD_SUEDE': 10,
+
+        'SNACKPACK_CHOCOLATE': 6,
+        'SNACKPACK_PISTACHIO': 8,
+        'SNACKPACK_RASPBERRY': 8,
+        'SNACKPACK_STRAWBERRY': 8,
+        'SNACKPACK_VANILLA': 8,
+
+        'UV_VISOR_AMBER': 10,
+        'UV_VISOR_MAGENTA': 8,
+        'UV_VISOR_ORANGE': 8,
+        'UV_VISOR_RED': 8,
+        'UV_VISOR_YELLOW': 8,
+    }
+
 })
 
 # ── Baseline ───────────────────────────────────────────────────────────────────
@@ -114,7 +284,7 @@ print(f"  Val   (R4 day 3):      {baseline_val:,.0f}")
 print()
 
 # ── Random search ──────────────────────────────────────────────────────────────
-N = 300
+N = 400
 results = []
 
 print(f"Running {N} random trials on R3 days 0+1+2  (one dot = 1 trial)...")

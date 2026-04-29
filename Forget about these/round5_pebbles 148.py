@@ -126,7 +126,7 @@ WINDOW    = 500   # rolling window for z-score
 ENTRY_Z   = 2.5   # z-score threshold to enter MR trade
 EXIT_Z    = 0.3   # z-score threshold to exit MR trade
 MAX_HOLD  = 200   # force-exit MR trade after this many ticks
-BG_POS = 8        # Pos in the background to buy and hold XL-XS
+BG_POS = 10        # Pos in the background to buy and hold XL-XS
 
 POS_LIMIT = 10    # position limit per product
 # ─────────────────────────────────────────────────────────────────────────────
