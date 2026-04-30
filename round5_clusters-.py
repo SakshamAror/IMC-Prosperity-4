@@ -160,17 +160,39 @@ CLUSTER_RISK_MULTIPLIER = 2.8   # CPS cluster sizing scaler to maintain active t
 CPS_POWER = 1.6   # nonlinear deviation amplification for CPS cluster allocation
 
 # ── Snackpack pairs ───────────────────────────────────────────────────────────
-# Both pairs pass ADF stationarity (t < -3.0). Static historical means used
-# because spreads are genuinely stationary (stable across all 3 days).
-# PISTACHIO-CHOCOLATE: ADF=-3.73, HL=775 ticks
-# RASPBERRY-STRAWBERRY: ADF=-3.15, HL=1104 ticks
-SNACK_PAIRS_ON = True
-SNACK_THRESHOLD = 50   # enter when |spread - historical_mean| > 50
-SNACK_PAIRS = [
-    ("SNACKPACK_PISTACHIO",  "SNACKPACK_CHOCOLATE",   348),
-    ("SNACKPACK_RASPBERRY",  "SNACKPACK_STRAWBERRY", -629),
+# Both pairs pass ADF stationarity (t-stat < -3.0). Static historical means
+# used because spreads are genuinely stationary (stable across all 3 days).
+# Mean is spread = sym_a - sym_b from historical data.
+# CHOCOLATE-PISTACHIO: ADF=-3.73, HL=775 ticks, mean=+348
+# RASPBERRY-STRAWBERRY: ADF=-3.15, HL=1104 ticks, mean=-629
+# ── UV Visor cluster (MAGENTA, ORANGE, RED, YELLOW — excludes AMBER) ─────────
+UV_CLUSTER_ON    = True
+UV_CLUSTER_POWER = 1.6
+UV_CLUSTER_RISK  = 40
+UV_MORY_PRODUCTS = [
+    "UV_VISOR_MAGENTA",
+    "UV_VISOR_ORANGE",
+    "UV_VISOR_RED",
+    "UV_VISOR_YELLOW",
 ]
-SNACK_PAIR_PRODUCTS = {p for pair in SNACK_PAIRS for p in pair[:2]}
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Snackpack pair MR ─────────────────────────────────────────────────────────
+# CHOCO-PISTA: HL=775, drifts mildly across days
+# RASPB-STRAW: HL=1104, drifts heavily (-230 → -677 → -979)
+# → MUST use rolling window (not static mean). Spread~17 per product
+#   means naive flipping eats PnL via slippage. Hysteresis (entry vs exit z)
+#   + force-exit avoids overtrading.
+SNACK_PAIRS_ON   = True
+SNACK_WINDOW     = 1500   # rolling window for mean/std (handles drift)
+SNACK_ENTRY_Z    = 2.0    # high entry-z to avoid noise flips
+SNACK_EXIT_Z     = 0.3    # low exit-z for hysteresis (let trade work)
+SNACK_MAX_HOLD   = 500    # force-exit after this many ticks
+SNACK_PAIRS = [
+    ("SNACKPACK_CHOCOLATE",  "SNACKPACK_PISTACHIO"),
+    ("SNACKPACK_RASPBERRY",  "SNACKPACK_STRAWBERRY"),
+]
+SNACK_PAIR_PRODUCTS = {p for pair in SNACK_PAIRS for p in pair}
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Genuine uptrends — hold size sqrt-scaled to trend strength
@@ -231,11 +253,65 @@ def place(symbol: str, od: OrderDepth, cur: int, tgt: int, result: dict):
         result[symbol] = [Order(symbol, price, delta)]
 
 
-# ── Snackpack pair MR ────────────────────────────────────────────────────────
-def trade_snackpack_pairs(state: TradingState, orders_out: dict):
+# ── UV Visor cluster ─────────────────────────────────────────────────────────
+def uv_cluster_factor(order_depths: dict):
+    vals = []
+    for p in UV_MORY_PRODUCTS:
+        od = order_depths.get(p)
+        if od:
+            m = get_mid(od)
+            if m is not None:
+                vals.append(m)
+    return sum(vals) / len(vals) if len(vals) == 4 else None
+
+
+def trade_uv_cluster(state: TradingState, orders_out: dict):
+    od = state.order_depths
+    factor = uv_cluster_factor(od)
+    if factor is None:
+        return
+    positions = state.position
+    ods  = {p: od.get(p) for p in UV_MORY_PRODUCTS}
+    devs = {}
+    for p in UV_MORY_PRODUCTS:
+        od_local = ods[p]
+        if od_local:
+            m = get_mid(od_local)
+            if m is not None:
+                devs[p] = m - factor
+    if len(devs) < 4:
+        return
+    denom = max(sum((abs(v) ** UV_CLUSTER_POWER) for v in devs.values()), 1e-9)
+    for symbol in UV_MORY_PRODUCTS:
+        od_local = ods[symbol]
+        if not od_local:
+            continue
+        raw = devs.get(symbol)
+        if raw is None:
+            continue
+        pos    = positions.get(symbol, 0)
+        signed = 1 if raw >= 0 else -1
+        weight = signed * (abs(raw) ** UV_CLUSTER_POWER)
+        target = max(-POS_LIMIT, min(POS_LIMIT, int(-(weight / denom) * UV_CLUSTER_RISK)))
+        qty    = target - pos
+        if qty == 0:
+            continue
+        price = max(od_local.buy_orders) if qty < 0 else min(od_local.sell_orders)
+        orders_out[symbol] = [Order(symbol, price, qty)]
+
+
+# ── Snackpack pair MR (hysteresis + rolling window) ──────────────────────────
+def trade_snackpack_pairs(state: TradingState, orders_out: dict, snk_state: dict):
+    """
+    snk_state: dict mapping pair-index str -> {"h": [spread history], "d": direction, "ld": hold counter}
+    Mutates snk_state in-place.
+    """
     od  = state.order_depths
     pos = state.position
-    for sym_a, sym_b, mean_spread in SNACK_PAIRS:
+    for i, (sym_a, sym_b) in enumerate(SNACK_PAIRS):
+        key = str(i)
+        ps  = snk_state.setdefault(key, {"h": [], "d": 0, "ld": 0})
+
         od_a = od.get(sym_a)
         od_b = od.get(sym_b)
         if not od_a or not od_b:
@@ -244,17 +320,47 @@ def trade_snackpack_pairs(state: TradingState, orders_out: dict):
         mid_b = get_mid(od_b)
         if mid_a is None or mid_b is None:
             continue
-        dev = (mid_a - mid_b) - mean_spread
+
+        # Update rolling spread history
+        ps["h"].append(mid_a - mid_b)
+        if len(ps["h"]) > SNACK_WINDOW:
+            ps["h"] = ps["h"][-SNACK_WINDOW:]
+
+        if len(ps["h"]) < 100:
+            continue
+
+        m, s = rolling_mean_std(ps["h"])
+        z = (ps["h"][-1] - m) / s
+
+        # Exit logic
+        if ps["d"] != 0:
+            ps["ld"] += 1
+            if abs(z) < SNACK_EXIT_Z or ps["ld"] >= SNACK_MAX_HOLD:
+                ps["d"]  = 0
+                ps["ld"] = 0
+
+        # Entry logic
+        if ps["d"] == 0:
+            if z > SNACK_ENTRY_Z:
+                ps["d"]  = -1   # a overpriced → short a, long b
+                ps["ld"] = 0
+            elif z < -SNACK_ENTRY_Z:
+                ps["d"]  = 1
+                ps["ld"] = 0
+
+        tgt_a = POS_LIMIT * ps["d"]
+        tgt_b = -POS_LIMIT * ps["d"]
         pos_a = pos.get(sym_a, 0)
         pos_b = pos.get(sym_b, 0)
-        if dev > SNACK_THRESHOLD:        # sym_a overpriced → short a, long b
-            tgt_a, tgt_b = -POS_LIMIT, POS_LIMIT
-        elif dev < -SNACK_THRESHOLD:     # sym_a underpriced → long a, short b
-            tgt_a, tgt_b = POS_LIMIT, -POS_LIMIT
-        else:
-            tgt_a, tgt_b = 0, 0
-        place(sym_a, od_a, pos_a, tgt_a, orders_out)
-        place(sym_b, od_b, pos_b, tgt_b, orders_out)
+
+        qty_a = tgt_a - pos_a
+        if qty_a != 0:
+            price_a = max(od_a.buy_orders) if qty_a < 0 else min(od_a.sell_orders)
+            orders_out[sym_a] = [Order(sym_a, price_a, qty_a)]
+        qty_b = tgt_b - pos_b
+        if qty_b != 0:
+            price_b = max(od_b.buy_orders) if qty_b < 0 else min(od_b.sell_orders)
+            orders_out[sym_b] = [Order(sym_b, price_b, qty_b)]
 
 
 # ── CPS Cluster System (nonlinear deviation-weighted mean reversion basket) ─
@@ -545,6 +651,7 @@ class Trader:
         di_hist   = mem.get("dh", [])
         di_hold   = mem.get("dhld", 0)
         di_dir    = mem.get("ddir", 0)
+        snk_state = mem.get("snk", {})
 
         od_xl = state.order_depths.get("PEBBLES_XL")
         od_xs = state.order_depths.get("PEBBLES_XS")
@@ -586,14 +693,19 @@ class Trader:
         trade_cps_cluster(state, result)
         trade_secondary_cluster(state, result)
 
+        # ── UV Visor cluster (MAGENTA, ORANGE, RED, YELLOW) ──────────
+        if UV_CLUSTER_ON:
+            trade_uv_cluster(state, result)
+
         # ── Snackpack pairs ───────────────────────────────────────────
         if SNACK_PAIRS_ON:
-            trade_snackpack_pairs(state, result)
+            trade_snackpack_pairs(state, result, snk_state)
 
         # ── All other products ────────────────────────────────────────
         SKIP = ({"PEBBLES_XL", "PEBBLES_XS", "ROBOT_DISHES", "ROBOT_IRONING"}
                 | set(SLEEP_POD_CLUSTER) | set(SLEEP_POD_SECONDARY_CLUSTER)
-                | (SNACK_PAIR_PRODUCTS if SNACK_PAIRS_ON else set()))
+                | (set(UV_MORY_PRODUCTS) if UV_CLUSTER_ON else set())
+                | (SNACK_PAIR_PRODUCTS   if SNACK_PAIRS_ON else set()))
         for symbol, od in state.order_depths.items():
             if symbol in SKIP:
                 continue
@@ -612,7 +724,8 @@ class Trader:
 
         # ── Save state ────────────────────────────────────────────────
         new_mem     = {"h": history, "hold": hold, "dir": direction,
-                       "dh": di_hist, "dhld": di_hold, "ddir": di_dir}
+                       "dh": di_hist, "dhld": di_hold, "ddir": di_dir,
+                       "snk": snk_state}
         trader_data = json.dumps(new_mem, separators=(",", ":"))
 
         logger.flush(state, result, conversions, trader_data)
