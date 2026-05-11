@@ -1,6 +1,6 @@
 # IMC Prosperity 4
 
-Algorithmic trading competition across 5 rounds. Each round introduced new products and market dynamics. This repo contains the final algorithms, exploration notebooks, and backtest logs for Rounds 3–5.
+This is **Team TRITONS'** work on the algorithmic trading portions of IMC Prosperity 4 — a global competition with 18,000+ teams. We finished **#122 globally**. This repo contains our final algorithms, exploration notebooks, and backtest logs for Rounds 3–5 of the competition, which introduced progressively more complex products and market dynamics each round.
 
 ---
 
@@ -73,7 +73,7 @@ A secondary bot (Mark 22) periodically dumped deep OTM options (VEV 6000/6500) a
 
 ## Round 5
 
-Round 5 introduced **50 new products** across 10 families of 5, each with a position limit of 50. Products ranged from trending assets to basket-constrained pebbles to mean-reverting specialty goods.
+Round 5 introduced **50 new products** across 10 families of 5, each with a position limit of 50. The algorithm used a modular sector architecture — each product family is an independent strategy class with its own logic and state.
 
 <p align="center">
   <img src="Images/r5_category_correlation.png" width="750" alt="Category correlation heatmap"/>
@@ -83,96 +83,94 @@ Round 5 introduced **50 new products** across 10 families of 5, each with a posi
 
 ---
 
-### PEBBLES: Basket Constraint Arbitrage
+### PEBBLES: XL/XS Pair Mean Reversion
 
-A structural invariant held throughout the round:
+Exploration revealed a structural basket constraint:
 
-$$\text{PEBBLES\_XS} + \text{PEBBLES\_S} + \text{PEBBLES\_M} + \text{PEBBLES\_L} + \text{PEBBLES\_XL} = 50{,}000$$
+```
+PEBBLES_XS + PEBBLES_S + PEBBLES_M + PEBBLES_L + PEBBLES_XL = 50,000  (std ≈ 2.8)
+```
 
 <p align="center">
   <img src="Images/r5_pebbles_basket.png" width="850" alt="Pebbles basket decomposition"/>
 </p>
 
-*Top panel: basket sum stays pinned at 50,000 (std ≈ 2.8). Lower panels: per-pebble deviations from their equal share of 10,000, confirming the basket constraint is enforced by the exchange.*
+*The basket sum stays pinned at 50,000 throughout the round. Per-pebble deviations from their equal share of 10,000 are mean-reverting.*
 
-The strategy computed each pebble's basket-adjusted fair value as:
-
-$$FV_i = \text{mid}_i + \frac{50000 - \sum_j \text{mid}_j}{5}$$
-
-When the correction was large enough to cross the spread, the strategy traded aggressively; otherwise it fell back to passive penny-jump market making.
+This constraint implies that XL and XS are negatively correlated — when XL rises above its fair share, XS must fall to compensate. The strategy exploited the XL−XS spread directly: when the spread deviated beyond a threshold, it bought the cheap leg and sold the expensive leg. S, M, and L were handled with standalone passive market making.
 
 <p align="center">
   <img src="Images/r5_pebbles_zscore.png" width="750" alt="Pebbles z-score MR signal"/>
 </p>
 
-*Rolling z-scores of per-pebble deviations from fair share. The z-scores are strongly mean-reverting, confirming the basket constraint as a reliable arbitrage anchor.*
+*Rolling z-scores of per-pebble deviations confirm strong mean reversion, motivating the pair trade.*
 
 ---
 
-### Trending Products: Linear Fair Value
+### Trending Products: Trend-Hold + Market Making
 
-Several product families exhibited persistent intra-day trends — prices drifted linearly throughout each day with a consistent per-day base shift. Using EMA-based fair values caused massive lag on these products, generating adverse selection.
+Several families had persistent intra-day and multi-day directional trends. Rather than tracking a lagging EMA fair value, the strategy held a fixed directional position on these products while providing passive liquidity around it.
 
-The solution: a linear trend fair value model with day detection:
-
-```
-fair(t) = day_base + day_index × daily_drift + slope × timestamp
-```
-
-The algorithm detects new days by watching for timestamp resets (a drop of >500,000 in the timestamp counter), increments a day index, and adjusts the base price accordingly. It then trades aggressively when the market is below fair value and rests a bid ladder to capture dips.
-
-**Galaxy Sounds** (5 products):
+**Galaxy Sounds** — all 5 products trended upward consistently across days:
 
 <p align="center">
   <img src="Images/r5_galaxy_prices.png" width="800" alt="Galaxy Sounds price series"/>
 </p>
 
-*All 5 Galaxy Sounds products across all days. The products trend upward consistently, with day-over-day base shifts of ~1,000 per product.*
+*All 5 Galaxy Sounds products across all days, showing persistent upward trends with day-over-day base shifts of ~1,000.*
 
-**Sleep Pods** (5 products):
+Each Galaxy Sounds product was assigned a hold size (e.g., +8 lots on BLACK\_HOLES) and the algorithm continuously worked toward that target while market-making around it to capture spread.
+
+**Sleep Pods** — five products split into two structural clusters (Cotton/Polyester/Suede and Lamb Wool/Nylon):
 
 <p align="center">
   <img src="Images/r5_sleep_prices.png" width="800" alt="Sleep Pod price series"/>
 </p>
 
-*Absolute mid-prices for all Sleep Pod variants. Day-to-day and intra-day trend magnitudes vary by product.*
+*Absolute mid-prices for all Sleep Pod variants across days.*
 
 <p align="center">
   <img src="Images/r5_sleep_trend_heatmap.png" width="650" alt="Sleep pod trend direction heatmap"/>
 </p>
 
-*OLS slope heatmap per product per day. Consistent sign and magnitude across days confirmed the trend was structural, not noise.*
+*OLS slope per product per day. Consistent sign and magnitude confirmed structural trends, not noise.*
 
 <p align="center">
   <img src="Images/r5_sleep_clusters.png" width="650" alt="Sleep pod cluster structure"/>
 </p>
 
-*Two distinct clusters emerged: Cotton/Polyester/Suede (Cluster A) and Lamb Wool/Nylon (Cluster B), moving together within each cluster but diverging across clusters.*
+*Two clusters emerged from the data: Cluster A (Cotton/Polyester/Suede) and Cluster B (Lamb Wool/Nylon), each trending as a group.*
 
 ---
 
-### Mean-Reverting Products: Fast EMA + Aggressive Fill
+### Directional Sector: UV Visors + Translators
 
-Four products showed strong negative autocorrelation: **ROBOT\_DISHES** (AC1 = −0.23), **ROBOT\_IRONING** (−0.13), **OXYGEN\_SHAKE\_EVENING\_BREATH** (−0.12), **OXYGEN\_SHAKE\_CHOCOLATE** (−0.09).
-
-These used a fast EMA (α = 0.01, half-life ~70 ticks) as a fair value anchor. When the mid-price deviated beyond a per-product threshold, the strategy hit the opposing side aggressively (up to 10 lots). When no signal was present, it fell back to passive penny-jump market making.
+UV Visors and several Translators showed large, consistent cumulative drifts across days (e.g., UV\_VISOR\_AMBER −28.7%, UV\_VISOR\_MAGENTA +15.3%, UV\_VISOR\_RED +17.2%). The strategy held fixed directional positions based on these observed biases, supplemented by a live bot-behavior learning signal that tracked which counterparties were profitable buyers vs sellers and adjusted sizing accordingly.
 
 ---
 
-### Stable Products: EMA Market Making
+### Cross-Cluster Relative Value
 
-**SNACKPACK** (3 stable variants) had highly stable intra-day fair values with minimal drift. A slow EMA (α = 0.0002, half-life ~3,500 ticks) tracked the fair value reliably. Quotes were posted symmetrically around the EMA with inventory-based skewing to manage position risk.
+Four products — UV\_VISOR\_RED, ROBOT\_DISHES, SNACKPACK\_RASPBERRY, SNACKPACK\_STRAWBERRY — were grouped into a cross-family cluster. The strategy held each product long (+5 lots baseline) and overlaid a mean-reversion signal: when any product deviated more than a threshold from the cluster mean, it faded the deviation with an additional ±5 lot MR position.
 
 ---
 
-### All Others: Penny-Jump Market Making
+### Robot Sector: Pair Mean Reversion
 
-The remaining 30+ products across Translators, Panels, UV Visors, Microchips, and remaining Oxygen Shakes used market-relative quoting with no EMA:
+ROBOT\_DISHES and ROBOT\_IRONING are negatively correlated — when one rises relative to the other, they tend to converge. The strategy traded the pair: when the spread exceeded a threshold, it went long the laggard and short the leader (both at the position limit), then reversed on mean reversion. ROBOT\_LAUNDRY was handled independently with passive market making.
 
-- **Spread ≥ 3**: quote at `best_bid + 1` / `best_ask − 1`
-- **Spread = 2**: join the best bid and ask
-- **Spread = 1**: skip (no profit margin)
-- Inventory cap at ±30 (60% of limit) — stop quoting one side when approaching limits to avoid large directional exposure on trending products
+---
+
+### Snackpack: Trend-Hold + Spread Overlay
+
+- **STRAWBERRY**: clean uptrend → hold +10 directionally
+- **CHOCOLATE**: downtrend → hold −10 directionally
+- **PISTACHIO**: EMA market making around a stable fair value
+- **RASPBERRY / VANILLA**: handled by the Cross-Cluster sector above
+
+### Remaining Products: Passive Market Making
+
+Translators (remaining), Panels, Microchips, and non-trending Oxygen Shakes used passive penny-jump market making — quote at `best_bid + 1` / `best_ask − 1` when spread ≥ 3, join the book when spread = 2, skip when spread = 1. Products with observed directional tendencies were selectively disabled.
 
 ---
 
