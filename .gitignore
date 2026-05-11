@@ -1,4 +1,18 @@
-*.log
-*.pyc
+# Logs & data
 *.log
 *.csv
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+
+# OS
+.DS_Store
+
+# Claude
+.claude/
+
+# Project-specific
+old models/
+backtests/
