@@ -97,80 +97,30 @@ PEBBLES_XS + PEBBLES_S + PEBBLES_M + PEBBLES_L + PEBBLES_XL = 50,000  (std ≈ 2
 
 *The basket sum stays pinned at 50,000 throughout the round. Per-pebble deviations from their equal share of 10,000 are mean-reverting.*
 
-This constraint implies that XL and XS are negatively correlated — when XL rises above its fair share, XS must fall to compensate. The strategy exploited the XL−XS spread directly: when the spread deviated beyond a threshold, it bought the cheap leg and sold the expensive leg. S, M, and L were handled with standalone passive market making.
-
-<p align="center">
-  <img src="Images/r5_pebbles_zscore.png" width="750" alt="Pebbles z-score MR signal"/>
-</p>
-
-*Rolling z-scores of per-pebble deviations confirm strong mean reversion, motivating the pair trade.*
+This constraint implies XL and XS are negatively correlated — when one rises above its fair share, the other falls to compensate. The strategy traded the XL−XS spread directly, buying the cheap leg and selling the expensive leg when the spread deviated beyond a threshold. S, M, and L were handled with standalone passive market making.
 
 ---
 
 ### Trending Products: Trend-Hold + Market Making
 
-Several families had persistent intra-day and multi-day directional trends. Rather than tracking a lagging EMA fair value, the strategy held a fixed directional position on these products while providing passive liquidity around it.
-
-**Galaxy Sounds** — all 5 products trended upward consistently across days:
+Several families had persistent intra-day and multi-day directional trends. Rather than using a lagging EMA, the strategy held a fixed directional position per product while providing passive liquidity around it to capture spread.
 
 <p align="center">
   <img src="Images/r5_galaxy_prices.png" width="800" alt="Galaxy Sounds price series"/>
 </p>
 
-*All 5 Galaxy Sounds products across all days, showing persistent upward trends with day-over-day base shifts of ~1,000.*
+*Galaxy Sounds products trending upward consistently across all days, with day-over-day base shifts of ~1,000. Each product was assigned a directional hold size and the algorithm worked toward that target each tick.*
 
-Each Galaxy Sounds product was assigned a hold size (e.g., +8 lots on BLACK\_HOLES) and the algorithm continuously worked toward that target while market-making around it to capture spread.
-
-**Sleep Pods** — five products split into two structural clusters (Cotton/Polyester/Suede and Lamb Wool/Nylon):
-
-<p align="center">
-  <img src="Images/r5_sleep_prices.png" width="800" alt="Sleep Pod price series"/>
-</p>
-
-*Absolute mid-prices for all Sleep Pod variants across days.*
-
-<p align="center">
-  <img src="Images/r5_sleep_trend_heatmap.png" width="650" alt="Sleep pod trend direction heatmap"/>
-</p>
-
-*OLS slope per product per day. Consistent sign and magnitude confirmed structural trends, not noise.*
-
-<p align="center">
-  <img src="Images/r5_sleep_clusters.png" width="650" alt="Sleep pod cluster structure"/>
-</p>
-
-*Two clusters emerged from the data: Cluster A (Cotton/Polyester/Suede) and Cluster B (Lamb Wool/Nylon), each trending as a group.*
+Sleep Pods split into two structural clusters — Cotton/Polyester/Suede and Lamb Wool/Nylon — each trending as a group. UV Visors and Translators showed large cumulative drifts (e.g., UV\_VISOR\_AMBER −28.7%, UV\_VISOR\_RED +17.2%) and were traded with fixed directional biases plus a bot-behavior learning signal.
 
 ---
 
-### Directional Sector: UV Visors + Translators
+### Pair and Cross-Cluster Mean Reversion
 
-UV Visors and several Translators showed large, consistent cumulative drifts across days (e.g., UV\_VISOR\_AMBER −28.7%, UV\_VISOR\_MAGENTA +15.3%, UV\_VISOR\_RED +17.2%). The strategy held fixed directional positions based on these observed biases, supplemented by a live bot-behavior learning signal that tracked which counterparties were profitable buyers vs sellers and adjusted sizing accordingly.
-
----
-
-### Cross-Cluster Relative Value
-
-Four products — UV\_VISOR\_RED, ROBOT\_DISHES, SNACKPACK\_RASPBERRY, SNACKPACK\_STRAWBERRY — were grouped into a cross-family cluster. The strategy held each product long (+5 lots baseline) and overlaid a mean-reversion signal: when any product deviated more than a threshold from the cluster mean, it faded the deviation with an additional ±5 lot MR position.
-
----
-
-### Robot Sector: Pair Mean Reversion
-
-ROBOT\_DISHES and ROBOT\_IRONING are negatively correlated — when one rises relative to the other, they tend to converge. The strategy traded the pair: when the spread exceeded a threshold, it went long the laggard and short the leader (both at the position limit), then reversed on mean reversion. ROBOT\_LAUNDRY was handled independently with passive market making.
-
----
-
-### Snackpack: Trend-Hold + Spread Overlay
-
-- **STRAWBERRY**: clean uptrend → hold +10 directionally
-- **CHOCOLATE**: downtrend → hold −10 directionally
-- **PISTACHIO**: EMA market making around a stable fair value
-- **RASPBERRY / VANILLA**: handled by the Cross-Cluster sector above
-
-### Remaining Products: Passive Market Making
-
-Translators (remaining), Panels, Microchips, and non-trending Oxygen Shakes used passive penny-jump market making — quote at `best_bid + 1` / `best_ask − 1` when spread ≥ 3, join the book when spread = 2, skip when spread = 1. Products with observed directional tendencies were selectively disabled.
+- **ROBOT\_DISHES / ROBOT\_IRONING**: negatively correlated pair — go long the laggard, short the leader when the spread exceeds a threshold, reverse on convergence.
+- **Cross-cluster**: UV\_VISOR\_RED, ROBOT\_DISHES, SNACKPACK\_RASPBERRY, SNACKPACK\_STRAWBERRY held together as a basket. Each product held long (+5 baseline) with an MR overlay that fades deviations from the cluster mean.
+- **Snackpack**: STRAWBERRY trend-hold +10, CHOCOLATE trend-hold −10, PISTACHIO EMA market making.
+- **Remaining products** (Panels, Microchips, Oxygen Shakes, Translators): passive penny-jump market making.
 
 ---
 
