@@ -1,9 +1,6 @@
 # IMC Prosperity 4
 
-This is our team **TRITONS** work on the algorithmic trading portions of IMC Prosperity 4, which is a global competition with 18,000+ teams. We finished **#122 globally**. This repo contains our final algorithms, and our our strategies for Rounds 3–5 of the competition, which introduced progressively more complex products and market dynamics each round.
-=======
 This is **Team TRITONS'** work on the algorithmic trading portions of IMC Prosperity 4, a global competition with 18,000+ teams. We finished **#122 globally**. This repo contains our final algorithms and exploration notebooks for Rounds 3-5 of the competition, which introduced progressively more complex products and market dynamics each round.
->>>>>>> Stashed changes
 
 ---
 
