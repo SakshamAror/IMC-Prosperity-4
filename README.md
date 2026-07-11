@@ -141,5 +141,4 @@ IMC Prosperity 4/
 │   ├── round4_final.py
 │   └── round5_final.py
 ├── Images/                  charts used in this README
-└── round5_claudia.py        Round 5 working algorithm
 ```
