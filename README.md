@@ -140,5 +140,5 @@ IMC Prosperity 4/
 │   ├── round3_final.py
 │   ├── round4_final.py
 │   └── round5_final.py
-├── Images/                  charts used in this README
+└──  Images/                  charts used in this README
 ```
