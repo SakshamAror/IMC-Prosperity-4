@@ -20,7 +20,8 @@ Both spot products exhibited strong mean-reverting behavior around stable fair v
 
 - Computed the deviation of the current mid-price from FV
 - Set a target inventory proportional to `-deviation` (lean long when cheap, lean short when expensive)
-- Posted three order layers: aggressive taker orders when misprice exceeded a threshold, passive inventory-skewed quotes, and penny-jump fills with remaining capacity
+- Posted four order layers: taker orders when the book was mispriced past a threshold, passive inventory-skewed quotes, an aggressive cross at the best bid or ask on large deviations, and penny-jump plus join fills with the remaining capacity
+- Ramped the inventory target up over a warmup period at the start of each run
 - Round 4 added realized volatility scaling, where the quote spread and position target scaled with a rolling vol ratio to adapt to regime changes
 
 <p align="center">
@@ -33,9 +34,9 @@ Both spot products exhibited strong mean-reverting behavior around stable fair v
 
 ### Options: Theta-Decayed Fair Values
 
-Eight call options on VELVETFRUIT at strikes 4000-5500 were market-made using Black-Scholes calibrated fair values. The key insight was that each option's price decays predictably as expiry approaches.
+Eight call options on VELVETFRUIT at strikes 4000-5500 were market-made around fixed per-strike fair values taken from historical option prices. The key insight was that each option's price decays predictably as expiry approaches, so the fair value has to be shifted down over time instead of held constant.
 
-**Round 3** used static BS fair values at TTE = 5 days, treating each option independently as a mean-reversion target around its BS price.
+**Round 3** used a static fair value per strike, calibrated from historical prices at roughly 7 days to expiry and shifted down once for the live round to account for theta, since TTE started at 5 days. Each option was treated independently as a mean-reversion target around that fixed value. The deep ITM strikes (4000, 4500) were left unadjusted because intrinsic value dominates their price.
 
 **Round 4** modeled the decay explicitly. For OTM strikes (5100-5500), the fair value followed:
 
@@ -59,9 +60,9 @@ where $C_K$ is a per-strike coefficient fitted from historical option prices and
   <img src="Images/r34_iv_smile.png" width="650" alt="Implied volatility smile"/>
 </p>
 
-*Implied volatility smile computed from median option prices across all strikes, shown per day. The smile is stable across days, validating the BS framework as the fair value anchor.*
+*Implied volatility smile computed from median option prices across all strikes, shown per day. The smile is stable across days, so relative pricing across strikes did not shift between days.*
 
-Each option was traded with the same inventory-skewed MR approach as the spot assets, quoting around its BS fair value with aggression when the market price deviated beyond a strike-specific threshold.
+Each option was traded with the same inventory-skewed MR approach as the spot assets, quoting around its fair value with aggression when the market price deviated beyond a strike-specific threshold. Quote skew was scaled by deviation relative to fair value so it stays proportional across strikes with very different price levels.
 
 ---
 
